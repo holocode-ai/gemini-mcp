@@ -41,7 +41,7 @@ type Server struct {
 // Input types for tools
 type GeminiImageGenerationInput struct {
 	Prompt          string   `json:"prompt" jsonschema:"description:Detailed text prompt describing what you want to visualize. Be specific about style, composition, colors, mood, and any particular elements you want included in the image."`
-	Model           string   `json:"model,omitempty" jsonschema:"description:Gemini model to use for generation. Supported models: 'gemini-2.5-flash-image-preview' (latest image-focused model with multimodal capabilities), 'gemini-2.0-flash-preview' (experimental features). Default uses the latest image preview model for best results.,default:gemini-2.5-flash-image-preview"`
+	Model           string   `json:"model,omitempty" jsonschema:"description:Gemini model to use for generation. Supported models: 'gemini-3-pro-preview' (latest Gemini 3.0 Pro model with advanced reasoning and multimodal capabilities), 'gemini-2.5-flash-image-preview' (image-focused model), 'gemini-2.0-flash-preview' (experimental features). Default uses Gemini 3.0 Pro for best results.,default:gemini-3-pro-preview"`
 	Style           string   `json:"style,omitempty" jsonschema:"description:Image style preference such as 'photorealistic', 'artistic', 'cartoon', 'sketch', 'oil painting', 'watercolor', etc."`
 	AspectRatio     string   `json:"aspect_ratio,omitempty" jsonschema:"description:Preferred aspect ratio for the image. Common ratios: '1:1' (square), '16:9' (landscape), '9:16' (portrait), '4:3', '3:4'"`
 	Quality         string   `json:"quality,omitempty" jsonschema:"description:Image quality preference: 'high', 'medium', 'draft'. Higher quality may take longer to generate.,default:high"`
@@ -69,7 +69,7 @@ type GeminiImageGenerationOutput struct {
 type GeminiImageEditInput struct {
 	InputImagePath  string `json:"input_image_path" jsonschema:"description:Path to the input image file to edit (PNG, JPEG, WebP supported)"`
 	EditPrompt      string `json:"edit_prompt" jsonschema:"description:Detailed description of how to edit the image. Be specific about what changes to make."`
-	Model           string `json:"model,omitempty" jsonschema:"description:Gemini model to use for image editing,default:gemini-2.5-flash-image-preview"`
+	Model           string `json:"model,omitempty" jsonschema:"description:Gemini model to use for image editing,default:gemini-3-pro-preview"`
 	AspectRatio     string `json:"aspect_ratio,omitempty" jsonschema:"description:Preferred aspect ratio for the edited image. Common ratios: '1:1' (square), '16:9' (landscape), '9:16' (portrait), '4:3', '3:4'"`
 	PreserveStyle   bool   `json:"preserve_style,omitempty" jsonschema:"description:Whether to preserve the original image style during editing,default:true"`
 	EditType        string `json:"edit_type,omitempty" jsonschema:"description:Type of edit: 'modify' (change elements), 'add' (add new elements), 'remove' (remove elements), 'style' (change style),default:modify"`
@@ -91,7 +91,7 @@ type GeminiImageEditOutput struct {
 type GeminiMultiImageInput struct {
 	InputImagePaths []string `json:"input_image_paths" jsonschema:"description:Paths to input image files to combine (2-3 images recommended)"`
 	CombinePrompt   string   `json:"combine_prompt" jsonschema:"description:Description of how to combine or blend the images"`
-	Model           string   `json:"model,omitempty" jsonschema:"description:Gemini model to use for multi-image processing,default:gemini-2.5-flash-image-preview"`
+	Model           string   `json:"model,omitempty" jsonschema:"description:Gemini model to use for multi-image processing,default:gemini-3-pro-preview"`
 	AspectRatio     string   `json:"aspect_ratio,omitempty" jsonschema:"description:Preferred aspect ratio for the combined image. Common ratios: '1:1' (square), '16:9' (landscape), '9:16' (portrait), '4:3', '3:4'"`
 	BlendMode       string   `json:"blend_mode,omitempty" jsonschema:"description:How to blend images: 'merge', 'collage', 'overlay', 'sequence',default:merge"`
 	OutputStyle     string   `json:"output_style,omitempty" jsonschema:"description:Style for the combined image: 'photorealistic', 'artistic', 'seamless'"`
@@ -108,20 +108,6 @@ type GeminiMultiImageOutput struct {
 	Metadata        map[string]string `json:"metadata,omitempty"`
 	GeneratedAt     string            `json:"generated_at"`
 	ImagesProcessed int               `json:"images_processed"`
-}
-
-type ImagenGenerationInput struct {
-	Prompt          string `json:"prompt" jsonschema:"description:Detailed text prompt for image generation. Be as specific as possible about the desired image content, style, composition, lighting, colors, and any other visual elements. Example: 'A serene mountain landscape at sunset with purple and orange sky, reflecting in a calm lake, photorealistic style'"`
-	Model           string `json:"model,omitempty" jsonschema:"description:Imagen model variant to use for generation,default:imagen-4.0-generate-001"`
-	NumImages       int    `json:"num_images,omitempty" jsonschema:"description:Number of images to generate in a single request (1-4),default:1"`
-	AspectRatio     string `json:"aspect_ratio,omitempty" jsonschema:"description:Aspect ratio for generated images,default:1:1,enum:1:1,enum:16:9,enum:9:16,enum:4:3,enum:3:4"`
-	OutputDirectory string `json:"output_directory,omitempty" jsonschema:"description:Optional local directory path where generated images will be saved as PNG files"`
-}
-
-type ImagenGenerationOutput struct {
-	ImagesGenerated int      `json:"images_generated"`
-	Model           string   `json:"model"`
-	SavedFiles      []string `json:"saved_files,omitempty"`
 }
 
 // Text-to-Video Generation
@@ -247,11 +233,6 @@ func (s *Server) registerTools(server *mcp.Server) {
 		Description: "Combine and blend multiple images using Google's Gemini AI models. Supports merging 2-3 images into cohesive compositions, creating collages, overlays, and seamless blends. Ideal for character consistency across scenes, style unification, and creative image compositions.",
 	}, s.handleGeminiMultiImage)
 
-	// Register imagen_t2i tool
-	mcp.AddTool(server, &mcp.Tool{
-		Name:        "imagen_t2i",
-		Description: "Generate high-quality images using Google's state-of-the-art Imagen models via Gemini API. Imagen is Google's advanced text-to-image diffusion model capable of creating photorealistic and artistic images from detailed text descriptions. This tool supports multiple Imagen model variants optimized for different use cases, from fast generation to ultra-high quality output.",
-	}, s.handleImagenGeneration)
 
 	// Register veo_text_to_video tool
 	mcp.AddTool(server, &mcp.Tool{
@@ -281,7 +262,7 @@ func (s *Server) handleGeminiImageGeneration(ctx context.Context, req *mcp.CallT
 	// Set defaults
 	model := input.Model
 	if model == "" {
-		model = "gemini-2.5-flash-image-preview"
+		model = "gemini-3-pro-preview"
 	}
 
 	style := input.Style
@@ -439,7 +420,7 @@ func (s *Server) handleGeminiImageEdit(ctx context.Context, req *mcp.CallToolReq
 
 	model := input.Model
 	if model == "" {
-		model = "gemini-2.5-flash-image-preview"
+		model = "gemini-3-pro-preview"
 	}
 
 	editType := input.EditType
@@ -577,7 +558,7 @@ func (s *Server) handleGeminiMultiImage(ctx context.Context, req *mcp.CallToolRe
 
 	model := input.Model
 	if model == "" {
-		model = "gemini-2.5-flash-image-preview"
+		model = "gemini-3-pro-preview"
 	}
 
 	blendMode := input.BlendMode
@@ -697,75 +678,6 @@ func (s *Server) handleGeminiMultiImage(ctx context.Context, req *mcp.CallToolRe
 	}, nil
 }
 
-func (s *Server) handleImagenGeneration(ctx context.Context, req *mcp.CallToolRequest, input ImagenGenerationInput) (*mcp.CallToolResult, ImagenGenerationOutput, error) {
-	if input.Prompt == "" {
-		return nil, ImagenGenerationOutput{}, fmt.Errorf("prompt is required")
-	}
-
-	model := input.Model
-	if model == "" {
-		model = "imagen-4.0-generate-001"
-	}
-
-	numImages := input.NumImages
-	if numImages == 0 {
-		numImages = 1
-	}
-
-	aspectRatio := input.AspectRatio
-	if aspectRatio == "" {
-		aspectRatio = "1:1"
-	}
-
-	log.Printf("Generating %d image(s) with model %s for prompt: %s", numImages, model, input.Prompt)
-
-	// Create configuration for image generation
-	config := &genai.GenerateImagesConfig{
-		NumberOfImages: int32(numImages),
-		AspectRatio:    aspectRatio,
-	}
-
-	// Generate images using Gemini API
-	response, err := s.client.Models.GenerateImages(ctx, model, input.Prompt, config)
-	if err != nil {
-		return nil, ImagenGenerationOutput{}, fmt.Errorf("error generating images: %v", err)
-	}
-
-	if response == nil || len(response.GeneratedImages) == 0 {
-		return nil, ImagenGenerationOutput{}, fmt.Errorf("no images were generated")
-	}
-
-	// Process generated images
-	var savedFiles []string
-	timestamp := time.Now().Format("20060102_150405")
-
-	for i, generatedImage := range response.GeneratedImages {
-		if generatedImage.Image == nil {
-			continue
-		}
-
-		// Save to local directory if specified
-		if input.OutputDirectory != "" {
-			filename := fmt.Sprintf("imagen_%s_%d.png", timestamp, i)
-			outputPath := filepath.Join(input.OutputDirectory, filename)
-
-			if err := os.MkdirAll(input.OutputDirectory, 0755); err == nil {
-				if len(generatedImage.Image.ImageBytes) > 0 {
-					if err := os.WriteFile(outputPath, generatedImage.Image.ImageBytes, 0644); err == nil {
-						savedFiles = append(savedFiles, outputPath)
-						log.Printf("Saved image to: %s", outputPath)
-					}
-				}
-			}
-		}
-	}
-
-	return nil, ImagenGenerationOutput{
-		ImagesGenerated: len(response.GeneratedImages),
-		Model:           model,
-		SavedFiles:      savedFiles,
-	}, nil
-}
 
 func (s *Server) handleVeoGeneration(ctx context.Context, req *mcp.CallToolRequest, input VeoGenerationInput) (*mcp.CallToolResult, VeoGenerationOutput, error) {
 	if input.Prompt == "" {
@@ -1096,29 +1008,15 @@ func (s *Server) handleVeoImageToVideo(ctx context.Context, req *mcp.CallToolReq
 
 	timestamp := time.Now().Format("20060102_150405")
 
-	// For image-to-video, we need to first generate the image using Imagen
-	// or provide the image in the correct format. Based on reference code,
-	// we should use Imagen to process the image for compatibility
-
-	// Generate an image description for Imagen processing
-	imagePrompt := fmt.Sprintf("Transform this image: %s", input.Prompt)
-
-	// Generate image with Imagen (this processes the input image)
-	imagenResponse, err := s.client.Models.GenerateImages(
-		ctx,
-		"imagen-4.0-generate-001",
-		imagePrompt,
-		nil,
-	)
+	// Read the input image file
+	imageData, err := os.ReadFile(input.ImagePath)
 	if err != nil {
-		// If Imagen fails, log but continue with nil image (text-only)
-		log.Printf("Warning: Could not process image with Imagen: %v", err)
-		// We'll treat this as text-to-video instead
+		return nil, VeoGenerationOutput{}, fmt.Errorf("failed to read input image: %v", err)
 	}
 
-	var inputImage *genai.Image
-	if imagenResponse != nil && len(imagenResponse.GeneratedImages) > 0 {
-		inputImage = imagenResponse.GeneratedImages[0].Image
+	// Create Image object from the file data
+	inputImage := &genai.Image{
+		ImageBytes: imageData,
 	}
 
 	// Build prompt with negative prompt if specified

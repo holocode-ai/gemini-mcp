@@ -57,12 +57,15 @@ This is a Go-based Model Context Protocol (MCP) server for Google Gemini AI serv
 Uses `google.golang.org/genai` library with Gemini API backend:
 
 ### Currently Implemented
-- **gemini_image_generation**: Text-based image description generation using Gemini models
-- **imagen_t2i**: Image generation using Imagen models via Gemini API
+- **gemini_image_generation**: Image generation using Gemini 3.0 Pro models
+- **gemini_image_edit**: Image editing using Gemini AI models
+- **gemini_multi_image**: Multi-image composition using Gemini AI models
+- **veo_text_to_video**: Video generation from text using Veo 3.0 models
+- **veo_image_to_video**: Video generation from images using Veo 3.0 models
 
 ### Implementation Details
-- Uses `client.Models.GenerateContent()` for text generation
-- Uses `client.Models.GenerateImages()` for image generation
+- Uses `client.Models.GenerateContent()` for image generation and editing
+- Uses `client.Models.GenerateVideos()` for video generation
 - Supports file output to local directories
 - Proper error handling and response formatting
 

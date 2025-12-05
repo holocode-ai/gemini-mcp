@@ -5,14 +5,13 @@ A comprehensive Model Context Protocol (MCP) server for Google Gemini AI service
 ## 🚀 Features
 
 ### **Multimodal AI Services**
-- **🖼️ Image Generation**: High-quality image creation using Gemini 2.5 Flash Image Preview and Imagen 4.0 models
+- **🖼️ Image Generation**: High-quality image creation using Gemini 3.0 Pro models
 - **✏️ Image Editing**: Advanced image modification and enhancement using Gemini AI models
 - **🔀 Multi-Image Composition**: Seamless blending and combining of multiple images
 - **🎬 Video Generation**: Cinematic video creation using Google's Veo 3.0 models (text-to-video and image-to-video)
 
 ### **Advanced Model Support**
-- **Gemini Models**: `gemini-2.5-flash-image-preview`, `gemini-2.0-flash-preview`
-- **Imagen Models**: `imagen-4.0-generate-001` (latest), `imagen-4.0-ultra-generate-001`, `imagen-4.0-fast-generate-001`
+- **Gemini Models**: `gemini-3-pro-preview` (Gemini 3.0 Pro - latest with advanced reasoning), `gemini-2.5-flash-image-preview`, `gemini-2.0-flash-preview`
 - **Veo Models**: `veo-3.0-generate-001`, `veo-3.0-fast-generate-001`, `veo-2.0-generate-001`
 
 ### **MCP Protocol Features**
@@ -167,7 +166,7 @@ Generate high-quality images using Google's latest Gemini image generation model
 
 **Parameters:**
 - `prompt` (required): Detailed description of desired image
-- `model`: Gemini model variant (default: `gemini-2.5-flash-image-preview`)
+- `model`: Gemini model variant (default: `gemini-3-pro-preview`)
 - `output_directory`: Local save path
 
 ### 2. **gemini_image_edit**
@@ -200,28 +199,7 @@ Combine and blend multiple images using Google's Gemini AI models.
 - `blend_mode`: How to combine the images
 - `output_directory`: Local save path
 
-### 4. **imagen_t2i**
-Generate high-quality images using Google's state-of-the-art Imagen models.
-
-**Key Features:**
-- Photorealistic and artistic image creation
-- Multiple model variants for different use cases
-- Support for various aspect ratios
-- Batch generation (1-4 images)
-
-**Parameters:**
-- `prompt` (required): Detailed image description
-- `model`: Imagen variant (default: `imagen-4.0-generate-001`)
-- `num_images`: Number of images (1-4, default: 1)
-- `aspect_ratio`: Image ratio (`1:1`, `16:9`, `9:16`, `4:3`, `3:4`)
-- `output_directory`: Local save path
-
-**Supported Models:**
-- `imagen-4.0-generate-001`: Latest standard model
-- `imagen-4.0-ultra-generate-001`: Highest quality
-- `imagen-4.0-fast-generate-001`: Fastest generation
-
-### 5. **veo_text_to_video**
+### 4. **veo_text_to_video**
 Generate 8-second videos from text prompts using Google's Veo 3.0 models.
 
 **Key Features:**
@@ -355,7 +333,7 @@ make clean  # Clean artifacts
 
 - **Gemini Integration**: Uses `google.golang.org/genai` with Gemini API backend
 - **Protocol Compliance**: Implements MCP 2024-11-05 specification
-- **Image Generation**: Full implementation with Gemini 2.5 Flash Image Preview and Imagen 4.0 models
+- **Image Generation**: Full implementation with Gemini 3.0 Pro models
 - **Video Generation**: Complete Veo 3.0 integration with operation polling and proper file downloads
 - **File Management**: Generated content saved with metadata and timestamps
 - **Error Handling**: Comprehensive error responses with helpful messages
