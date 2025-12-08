@@ -41,10 +41,10 @@ type Server struct {
 // Input types for tools
 type GeminiImageGenerationInput struct {
 	Prompt          string   `json:"prompt" jsonschema:"description:Detailed text prompt describing what you want to visualize. Be specific about style, composition, colors, mood, and any particular elements you want included in the image."`
-	Model           string   `json:"model,omitempty" jsonschema:"description:Gemini model to use for generation. Supported models: 'gemini-3-pro-preview' (latest Gemini 3.0 Pro model with advanced reasoning and multimodal capabilities), 'gemini-2.5-flash-image-preview' (image-focused model), 'gemini-2.0-flash-preview' (experimental features). Default uses Gemini 3.0 Pro for best results.,default:gemini-3-pro-preview"`
+	Model           string   `json:"model,omitempty" jsonschema:"description:Image generation model to use. Supported models: 'imagen-4.0-generate-001' (default - Google's latest Imagen 4.0 model with high-quality image generation), 'imagen-3.0-generate-001' (Imagen 3.0), 'gemini-3-pro-image-preview' (Gemini 3.0 Pro with image generation), 'gemini-2.5-flash-image' (fast Gemini image model).,default:imagen-4.0-generate-001"`
 	Style           string   `json:"style,omitempty" jsonschema:"description:Image style preference such as 'photorealistic', 'artistic', 'cartoon', 'sketch', 'oil painting', 'watercolor', etc."`
-	AspectRatio     string   `json:"aspect_ratio,omitempty" jsonschema:"description:Preferred aspect ratio for the image. Common ratios: '1:1' (square), '16:9' (landscape), '9:16' (portrait), '4:3', '3:4'"`
-	Quality         string   `json:"quality,omitempty" jsonschema:"description:Image quality preference: 'high', 'medium', 'draft'. Higher quality may take longer to generate.,default:high"`
+	AspectRatio     string   `json:"aspect_ratio,omitempty" jsonschema:"description:Preferred aspect ratio for the image. Supported ratios: '1:1' (square), '3:4', '4:3', '9:16' (portrait), '16:9' (landscape)"`
+	Quality         string   `json:"quality,omitempty" jsonschema:"description:Image quality preference: 'high' (2K resolution), 'medium' (1K), 'draft' (1K). Higher quality may take longer to generate.,default:high"`
 	SafetyLevel     string   `json:"safety_level,omitempty" jsonschema:"description:Content safety level: 'strict', 'moderate', 'permissive'. Controls content filtering.,default:moderate"`
 	Language        string   `json:"language,omitempty" jsonschema:"description:Language for prompt processing. Supported: 'en' (English), 'es-MX' (Spanish Mexico), 'ja' (Japanese), 'zh' (Chinese), 'hi' (Hindi),default:en"`
 	IncludeText     bool     `json:"include_text,omitempty" jsonschema:"description:Whether to include high-fidelity text rendering in the image. Enable for images that need clear text elements.,default:false"`
@@ -262,7 +262,7 @@ func (s *Server) handleGeminiImageGeneration(ctx context.Context, req *mcp.CallT
 	// Set defaults
 	model := input.Model
 	if model == "" {
-		model = "gemini-3-pro-preview"
+		model = "imagen-4.0-generate-001" // Default to Imagen 4.0 for reliable image generation
 	}
 
 	style := input.Style
@@ -284,80 +284,109 @@ func (s *Server) handleGeminiImageGeneration(ctx context.Context, req *mcp.CallT
 
 	// Build enhanced prompt with style and parameters
 	var promptParts []string
-	promptParts = append(promptParts, fmt.Sprintf("Create a picture of %s", input.Prompt))
+	promptParts = append(promptParts, input.Prompt)
 
-	if style != "" {
-		promptParts = append(promptParts, fmt.Sprintf("Style: %s", style))
-	}
-
-	if input.AspectRatio != "" {
-		promptParts = append(promptParts, fmt.Sprintf("Aspect ratio: %s", input.AspectRatio))
+	if style != "" && style != "photorealistic" {
+		promptParts = append(promptParts, fmt.Sprintf("in %s style", style))
 	}
 
 	if input.IncludeText {
-		promptParts = append(promptParts, "Include high-fidelity text rendering")
+		promptParts = append(promptParts, "with high-fidelity text rendering")
 	}
 
 	if quality == "high" {
-		promptParts = append(promptParts, "High quality, detailed rendering")
+		promptParts = append(promptParts, "highly detailed")
 	}
 
-	promptText := strings.Join(promptParts, ". ")
-	contents := genai.Text(promptText)
-	response, err := s.client.Models.GenerateContent(ctx, model, contents, nil)
+	promptText := strings.Join(promptParts, ", ")
+
+	// Configure GenerateImagesConfig
+	config := &genai.GenerateImagesConfig{
+		NumberOfImages: 1, // Generate 1 image by default
+	}
+
+	// Set aspect ratio if provided
+	if input.AspectRatio != "" {
+		config.AspectRatio = input.AspectRatio
+	}
+
+	// Map quality to image size
+	// Quality: "high" -> "2K", "medium" -> "1K", "draft" -> "1K"
+	imageSize := "2K"
+	if quality == "medium" || quality == "draft" {
+		imageSize = "1K"
+	}
+	config.ImageSize = imageSize
+
+	// Set safety level
+	if input.SafetyLevel != "" {
+		switch input.SafetyLevel {
+		case "strict":
+			config.SafetyFilterLevel = genai.SafetyFilterLevelBlockLowAndAbove
+		case "permissive":
+			config.SafetyFilterLevel = genai.SafetyFilterLevelBlockOnlyHigh
+		default: // moderate
+			config.SafetyFilterLevel = genai.SafetyFilterLevelBlockMediumAndAbove
+		}
+	}
+
+	// Set language if supported
+	if language != "en" {
+		switch language {
+		case "zh":
+			config.Language = genai.ImagePromptLanguageZh
+		case "hi":
+			config.Language = genai.ImagePromptLanguageHi
+		case "ja":
+			config.Language = genai.ImagePromptLanguageJa
+		case "es-MX", "es":
+			config.Language = genai.ImagePromptLanguageEs
+		}
+	}
+
+	// Generate images using the dedicated GenerateImages method
+	response, err := s.client.Models.GenerateImages(ctx, model, promptText, config)
 	if err != nil {
-		return nil, GeminiImageGenerationOutput{}, fmt.Errorf("error generating content: %v", err)
+		return nil, GeminiImageGenerationOutput{}, fmt.Errorf("error generating images: %v", err)
 	}
 
-	if response == nil || len(response.Candidates) == 0 {
-		return nil, GeminiImageGenerationOutput{}, fmt.Errorf("no content was generated")
+	if response == nil || len(response.GeneratedImages) == 0 {
+		return nil, GeminiImageGenerationOutput{}, fmt.Errorf("no images were generated")
 	}
 
-	// Process response to extract both text and image data
-	var resultText string
+	// Process response and save images
 	var savedFiles []string
 	timestamp := time.Now().Format("20060102_150405")
-	imagesCreated := 0
+	imagesCreated := len(response.GeneratedImages)
 
-	for _, candidate := range response.Candidates {
-		if candidate.Content == nil {
-			continue
-		}
+	// Save generated images to local directory
+	outputDir := input.OutputDirectory
+	if outputDir == "" {
+		outputDir = s.config.OutputDir
+	}
 
-		for i, part := range candidate.Content.Parts {
-			// Extract text description
-			if part.Text != "" {
-				resultText = part.Text
-			}
+	if outputDir != "" {
+		if err := os.MkdirAll(outputDir, 0755); err == nil {
+			for i, genImage := range response.GeneratedImages {
+				if genImage.Image != nil && len(genImage.Image.ImageBytes) > 0 {
+					filename := fmt.Sprintf("imagen_generated_%s_%s_%d.png", style, timestamp, i)
+					outputPath := filepath.Join(outputDir, filename)
 
-			// Extract and save image data
-			if part.InlineData != nil && len(part.InlineData.Data) > 0 {
-				imagesCreated++
-				// Save to local directory if specified, or use default output directory
-				outputDir := input.OutputDirectory
-				if outputDir == "" {
-					outputDir = s.config.OutputDir
-				}
-
-				if outputDir != "" {
-					if err := os.MkdirAll(outputDir, 0755); err == nil {
-						filename := fmt.Sprintf("gemini_generated_%s_%s_%d.png", style, timestamp, i)
-						outputPath := filepath.Join(outputDir, filename)
-
-						if err := os.WriteFile(outputPath, part.InlineData.Data, 0644); err == nil {
-							savedFiles = append(savedFiles, outputPath)
-							log.Printf("Saved generated image to: %s", outputPath)
-						}
+					if err := os.WriteFile(outputPath, genImage.Image.ImageBytes, 0644); err == nil {
+						savedFiles = append(savedFiles, outputPath)
+						log.Printf("Saved generated image to: %s", outputPath)
+					} else {
+						log.Printf("Error saving image: %v", err)
 					}
 				}
 			}
+		} else {
+			log.Printf("Error creating output directory: %v", err)
 		}
 	}
 
-	// If no text description was generated, create a default one
-	if resultText == "" {
-		resultText = "Image generated successfully"
-	}
+	// Create result description
+	resultText := fmt.Sprintf("Successfully generated %d image(s) using %s", imagesCreated, model)
 
 	// Create metadata
 	metadata := map[string]string{
@@ -365,13 +394,14 @@ func (s *Server) handleGeminiImageGeneration(ctx context.Context, req *mcp.CallT
 		"enhanced_prompt": promptText,
 		"quality":         quality,
 		"safety_level":    input.SafetyLevel,
+		"image_size":      imageSize,
 	}
 
-	// Also save metadata if output directory is specified
-	if input.OutputDirectory != "" {
-		if err := os.MkdirAll(input.OutputDirectory, 0755); err == nil {
-			filename := fmt.Sprintf("gemini_metadata_%s.json", timestamp)
-			outputPath := filepath.Join(input.OutputDirectory, filename)
+	// Save metadata if output directory is specified
+	if outputDir != "" {
+		if err := os.MkdirAll(outputDir, 0755); err == nil {
+			filename := fmt.Sprintf("imagen_metadata_%s.json", timestamp)
+			outputPath := filepath.Join(outputDir, filename)
 
 			metadataContent := map[string]interface{}{
 				"model":           model,
@@ -380,6 +410,7 @@ func (s *Server) handleGeminiImageGeneration(ctx context.Context, req *mcp.CallT
 				"style":           style,
 				"aspect_ratio":    input.AspectRatio,
 				"quality":         quality,
+				"image_size":      imageSize,
 				"language":        language,
 				"include_text":    input.IncludeText,
 				"tags":            input.Tags,
