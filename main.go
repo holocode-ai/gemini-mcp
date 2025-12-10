@@ -233,7 +233,6 @@ func (s *Server) registerTools(server *mcp.Server) {
 		Description: "Combine and blend multiple images using Google's Gemini AI models. Supports merging 2-3 images into cohesive compositions, creating collages, overlays, and seamless blends. Ideal for character consistency across scenes, style unification, and creative image compositions.",
 	}, s.handleGeminiMultiImage)
 
-
 	// Register veo_text_to_video tool
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "veo_text_to_video",
@@ -262,7 +261,7 @@ func (s *Server) handleGeminiImageGeneration(ctx context.Context, req *mcp.CallT
 	// Set defaults
 	model := input.Model
 	if model == "" {
-		model = "imagen-4.0-generate-001" // Default to Imagen 4.0 for reliable image generation
+		model = "gemini-3-pro-preview" // Default to Imagen 4.0 for reliable image generation
 	}
 
 	style := input.Style
@@ -708,7 +707,6 @@ func (s *Server) handleGeminiMultiImage(ctx context.Context, req *mcp.CallToolRe
 		ImagesProcessed: len(input.InputImagePaths),
 	}, nil
 }
-
 
 func (s *Server) handleVeoGeneration(ctx context.Context, req *mcp.CallToolRequest, input VeoGenerationInput) (*mcp.CallToolResult, VeoGenerationOutput, error) {
 	if input.Prompt == "" {
