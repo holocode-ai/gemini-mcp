@@ -41,7 +41,7 @@ type Server struct {
 // Input types for tools
 type GeminiImageGenerationInput struct {
 	Prompt          string   `json:"prompt" jsonschema:"description:Detailed text prompt describing what you want to visualize. Be specific about style, composition, colors, mood, and any particular elements you want included in the image."`
-	Model           string   `json:"model,omitempty" jsonschema:"description:Image generation model to use. Supported models: 'imagen-4.0-generate-001' (default - Google's latest Imagen 4.0 model with high-quality image generation), 'imagen-3.0-generate-001' (Imagen 3.0), 'gemini-3-pro-image-preview' (Gemini 3.0 Pro with image generation), 'gemini-2.5-flash-image' (fast Gemini image model).,default:imagen-4.0-generate-001"`
+	Model           string   `json:"model,omitempty" jsonschema:"description:Image generation model to use. Supported models: 'gemini-3-pro-image-preview' (default - Gemini 3 Pro with native image generation aka Nano Banana Pro), 'gemini-2.5-flash-image' (fast Gemini image model aka Nano Banana), 'imagen-4.0-generate-001' (Imagen 4.0), 'imagen-3.0-generate-001' (Imagen 3.0).,default:gemini-3-pro-image-preview"`
 	Style           string   `json:"style,omitempty" jsonschema:"description:Image style preference such as 'photorealistic', 'artistic', 'cartoon', 'sketch', 'oil painting', 'watercolor', etc."`
 	AspectRatio     string   `json:"aspect_ratio,omitempty" jsonschema:"description:Preferred aspect ratio for the image. Supported ratios: '1:1' (square), '3:4', '4:3', '9:16' (portrait), '16:9' (landscape)"`
 	Quality         string   `json:"quality,omitempty" jsonschema:"description:Image quality preference: 'high' (2K resolution), 'medium' (1K), 'draft' (1K). Higher quality may take longer to generate.,default:high"`
@@ -69,7 +69,7 @@ type GeminiImageGenerationOutput struct {
 type GeminiImageEditInput struct {
 	InputImagePath  string `json:"input_image_path" jsonschema:"description:Path to the input image file to edit (PNG, JPEG, WebP supported)"`
 	EditPrompt      string `json:"edit_prompt" jsonschema:"description:Detailed description of how to edit the image. Be specific about what changes to make."`
-	Model           string `json:"model,omitempty" jsonschema:"description:Gemini model to use for image editing,default:gemini-3-pro-preview"`
+	Model           string `json:"model,omitempty" jsonschema:"description:Gemini model to use for image editing,default:gemini-3-pro-image-preview"`
 	AspectRatio     string `json:"aspect_ratio,omitempty" jsonschema:"description:Preferred aspect ratio for the edited image. Common ratios: '1:1' (square), '16:9' (landscape), '9:16' (portrait), '4:3', '3:4'"`
 	PreserveStyle   bool   `json:"preserve_style,omitempty" jsonschema:"description:Whether to preserve the original image style during editing,default:true"`
 	EditType        string `json:"edit_type,omitempty" jsonschema:"description:Type of edit: 'modify' (change elements), 'add' (add new elements), 'remove' (remove elements), 'style' (change style),default:modify"`
@@ -91,7 +91,7 @@ type GeminiImageEditOutput struct {
 type GeminiMultiImageInput struct {
 	InputImagePaths []string `json:"input_image_paths" jsonschema:"description:Paths to input image files to combine (2-3 images recommended)"`
 	CombinePrompt   string   `json:"combine_prompt" jsonschema:"description:Description of how to combine or blend the images"`
-	Model           string   `json:"model,omitempty" jsonschema:"description:Gemini model to use for multi-image processing,default:gemini-3-pro-preview"`
+	Model           string   `json:"model,omitempty" jsonschema:"description:Gemini model to use for multi-image processing,default:gemini-3-pro-image-preview"`
 	AspectRatio     string   `json:"aspect_ratio,omitempty" jsonschema:"description:Preferred aspect ratio for the combined image. Common ratios: '1:1' (square), '16:9' (landscape), '9:16' (portrait), '4:3', '3:4'"`
 	BlendMode       string   `json:"blend_mode,omitempty" jsonschema:"description:How to blend images: 'merge', 'collage', 'overlay', 'sequence',default:merge"`
 	OutputStyle     string   `json:"output_style,omitempty" jsonschema:"description:Style for the combined image: 'photorealistic', 'artistic', 'seamless'"`
@@ -261,7 +261,7 @@ func (s *Server) handleGeminiImageGeneration(ctx context.Context, req *mcp.CallT
 	// Set defaults
 	model := input.Model
 	if model == "" {
-		model = "gemini-3-pro-preview" // Default to Imagen 4.0 for reliable image generation
+		model = "gemini-3-pro-image-preview" // Default to Gemini 3 Pro Image for native image generation
 	}
 
 	style := input.Style
@@ -299,88 +299,157 @@ func (s *Server) handleGeminiImageGeneration(ctx context.Context, req *mcp.CallT
 
 	promptText := strings.Join(promptParts, ", ")
 
-	// Configure GenerateImagesConfig
-	config := &genai.GenerateImagesConfig{
-		NumberOfImages: 1, // Generate 1 image by default
-	}
-
-	// Set aspect ratio if provided
-	if input.AspectRatio != "" {
-		config.AspectRatio = input.AspectRatio
-	}
-
 	// Map quality to image size
 	// Quality: "high" -> "2K", "medium" -> "1K", "draft" -> "1K"
 	imageSize := "2K"
 	if quality == "medium" || quality == "draft" {
 		imageSize = "1K"
 	}
-	config.ImageSize = imageSize
 
-	// Set safety level
-	if input.SafetyLevel != "" {
-		switch input.SafetyLevel {
-		case "strict":
-			config.SafetyFilterLevel = genai.SafetyFilterLevelBlockLowAndAbove
-		case "permissive":
-			config.SafetyFilterLevel = genai.SafetyFilterLevelBlockOnlyHigh
-		default: // moderate
-			config.SafetyFilterLevel = genai.SafetyFilterLevelBlockMediumAndAbove
-		}
-	}
-
-	// Set language if supported
-	if language != "en" {
-		switch language {
-		case "zh":
-			config.Language = genai.ImagePromptLanguageZh
-		case "hi":
-			config.Language = genai.ImagePromptLanguageHi
-		case "ja":
-			config.Language = genai.ImagePromptLanguageJa
-		case "es-MX", "es":
-			config.Language = genai.ImagePromptLanguageEs
-		}
-	}
-
-	// Generate images using the dedicated GenerateImages method
-	response, err := s.client.Models.GenerateImages(ctx, model, promptText, config)
-	if err != nil {
-		return nil, GeminiImageGenerationOutput{}, fmt.Errorf("error generating images: %v", err)
-	}
-
-	if response == nil || len(response.GeneratedImages) == 0 {
-		return nil, GeminiImageGenerationOutput{}, fmt.Errorf("no images were generated")
-	}
-
-	// Process response and save images
 	var savedFiles []string
 	timestamp := time.Now().Format("20060102_150405")
-	imagesCreated := len(response.GeneratedImages)
+	var imagesCreated int
 
-	// Save generated images to local directory
+	// Determine output directory
 	outputDir := input.OutputDirectory
 	if outputDir == "" {
 		outputDir = s.config.OutputDir
 	}
 
-	if outputDir != "" {
-		if err := os.MkdirAll(outputDir, 0755); err == nil {
-			for i, genImage := range response.GeneratedImages {
-				if genImage.Image != nil && len(genImage.Image.ImageBytes) > 0 {
-					filename := fmt.Sprintf("imagen_generated_%s_%s_%d.png", style, timestamp, i)
-					outputPath := filepath.Join(outputDir, filename)
+	// Check if using Gemini native image generation or Imagen
+	isGeminiModel := strings.HasPrefix(model, "gemini-")
 
-					if err := os.WriteFile(outputPath, genImage.Image.ImageBytes, 0644); err == nil {
-						savedFiles = append(savedFiles, outputPath)
-						log.Printf("Saved generated image to: %s", outputPath)
-					} else {
-						log.Printf("Error saving image: %v", err)
+	if isGeminiModel {
+		// Use GenerateContent for Gemini native image generation models
+		log.Printf("Using GenerateContent API for Gemini model: %s", model)
+
+		// Create content with text prompt
+		contents := []*genai.Content{
+			genai.NewContentFromText(promptText, genai.RoleUser),
+		}
+
+		// Configure for image generation
+		config := &genai.GenerateContentConfig{
+			ResponseModalities: []string{"IMAGE", "TEXT"},
+		}
+
+		// Generate content
+		response, err := s.client.Models.GenerateContent(ctx, model, contents, config)
+		if err != nil {
+			return nil, GeminiImageGenerationOutput{}, fmt.Errorf("error generating image: %v", err)
+		}
+
+		if response == nil || len(response.Candidates) == 0 {
+			return nil, GeminiImageGenerationOutput{}, fmt.Errorf("no image was generated")
+		}
+
+		// Process response and extract images
+		if outputDir != "" {
+			if err := os.MkdirAll(outputDir, 0755); err != nil {
+				log.Printf("Error creating output directory: %v", err)
+			}
+		}
+
+		for _, candidate := range response.Candidates {
+			if candidate.Content == nil {
+				continue
+			}
+
+			for i, part := range candidate.Content.Parts {
+				if part.InlineData != nil && len(part.InlineData.Data) > 0 {
+					imagesCreated++
+					if outputDir != "" {
+						filename := fmt.Sprintf("gemini_generated_%s_%s_%d.png", style, timestamp, i)
+						outputPath := filepath.Join(outputDir, filename)
+
+						if err := os.WriteFile(outputPath, part.InlineData.Data, 0644); err == nil {
+							savedFiles = append(savedFiles, outputPath)
+							log.Printf("Saved generated image to: %s", outputPath)
+						} else {
+							log.Printf("Error saving image: %v", err)
+						}
 					}
 				}
 			}
-		} else {
-			log.Printf("Error creating output directory: %v", err)
+		}
+
+		if imagesCreated == 0 {
+			return nil, GeminiImageGenerationOutput{}, fmt.Errorf("no images were generated in response")
+		}
+
+	} else {
+		// Use GenerateImages for Imagen models
+		log.Printf("Using GenerateImages API for Imagen model: %s", model)
+
+		// Configure GenerateImagesConfig
+		config := &genai.GenerateImagesConfig{
+			NumberOfImages: 1,
+		}
+
+		// Set aspect ratio if provided
+		if input.AspectRatio != "" {
+			config.AspectRatio = input.AspectRatio
+		}
+
+		config.ImageSize = imageSize
+
+		// Set safety level
+		if input.SafetyLevel != "" {
+			switch input.SafetyLevel {
+			case "strict":
+				config.SafetyFilterLevel = genai.SafetyFilterLevelBlockLowAndAbove
+			case "permissive":
+				config.SafetyFilterLevel = genai.SafetyFilterLevelBlockOnlyHigh
+			default:
+				config.SafetyFilterLevel = genai.SafetyFilterLevelBlockMediumAndAbove
+			}
+		}
+
+		// Set language if supported
+		if language != "en" {
+			switch language {
+			case "zh":
+				config.Language = genai.ImagePromptLanguageZh
+			case "hi":
+				config.Language = genai.ImagePromptLanguageHi
+			case "ja":
+				config.Language = genai.ImagePromptLanguageJa
+			case "es-MX", "es":
+				config.Language = genai.ImagePromptLanguageEs
+			}
+		}
+
+		// Generate images using the dedicated GenerateImages method
+		response, err := s.client.Models.GenerateImages(ctx, model, promptText, config)
+		if err != nil {
+			return nil, GeminiImageGenerationOutput{}, fmt.Errorf("error generating images: %v", err)
+		}
+
+		if response == nil || len(response.GeneratedImages) == 0 {
+			return nil, GeminiImageGenerationOutput{}, fmt.Errorf("no images were generated")
+		}
+
+		imagesCreated = len(response.GeneratedImages)
+
+		// Save generated images to local directory
+		if outputDir != "" {
+			if err := os.MkdirAll(outputDir, 0755); err == nil {
+				for i, genImage := range response.GeneratedImages {
+					if genImage.Image != nil && len(genImage.Image.ImageBytes) > 0 {
+						filename := fmt.Sprintf("imagen_generated_%s_%s_%d.png", style, timestamp, i)
+						outputPath := filepath.Join(outputDir, filename)
+
+						if err := os.WriteFile(outputPath, genImage.Image.ImageBytes, 0644); err == nil {
+							savedFiles = append(savedFiles, outputPath)
+							log.Printf("Saved generated image to: %s", outputPath)
+						} else {
+							log.Printf("Error saving image: %v", err)
+						}
+					}
+				}
+			} else {
+				log.Printf("Error creating output directory: %v", err)
+			}
 		}
 	}
 
@@ -399,7 +468,7 @@ func (s *Server) handleGeminiImageGeneration(ctx context.Context, req *mcp.CallT
 	// Save metadata if output directory is specified
 	if outputDir != "" {
 		if err := os.MkdirAll(outputDir, 0755); err == nil {
-			filename := fmt.Sprintf("imagen_metadata_%s.json", timestamp)
+			filename := fmt.Sprintf("image_metadata_%s.json", timestamp)
 			outputPath := filepath.Join(outputDir, filename)
 
 			metadataContent := map[string]interface{}{
@@ -450,7 +519,7 @@ func (s *Server) handleGeminiImageEdit(ctx context.Context, req *mcp.CallToolReq
 
 	model := input.Model
 	if model == "" {
-		model = "gemini-3-pro-preview"
+		model = "gemini-3-pro-image-preview"
 	}
 
 	editType := input.EditType
@@ -588,7 +657,7 @@ func (s *Server) handleGeminiMultiImage(ctx context.Context, req *mcp.CallToolRe
 
 	model := input.Model
 	if model == "" {
-		model = "gemini-3-pro-preview"
+		model = "gemini-3-pro-image-preview"
 	}
 
 	blendMode := input.BlendMode
