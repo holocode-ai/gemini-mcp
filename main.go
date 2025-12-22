@@ -41,7 +41,7 @@ type Server struct {
 // Input types for tools
 type GeminiImageGenerationInput struct {
 	Prompt          string   `json:"prompt" jsonschema:"description:Detailed text prompt describing what you want to visualize. Be specific about style, composition, colors, mood, and any particular elements you want included in the image."`
-	Model           string   `json:"model,omitempty" jsonschema:"description:Image generation model to use. Supported models: 'gemini-3-pro-image-preview' (default - Gemini 3 Pro with native image generation aka Nano Banana Pro), 'gemini-2.5-flash-image' (fast Gemini image model aka Nano Banana), 'imagen-4.0-generate-001' (Imagen 4.0), 'imagen-3.0-generate-001' (Imagen 3.0).,default:gemini-3-pro-image-preview"`
+	Model           string   `json:"model,omitempty" jsonschema:"description:Image generation model to use. Supported models: 'gemini-3-pro-image-preview' (default - Gemini 3 Pro with native image generation), 'gemini-2.5-flash-image' (fast Gemini image model).,default:gemini-3-pro-image-preview"`
 	Style           string   `json:"style,omitempty" jsonschema:"description:Image style preference such as 'photorealistic', 'artistic', 'cartoon', 'sketch', 'oil painting', 'watercolor', etc."`
 	AspectRatio     string   `json:"aspect_ratio,omitempty" jsonschema:"description:Preferred aspect ratio for the image. Supported ratios: '1:1' (square), '3:4', '4:3', '9:16' (portrait), '16:9' (landscape)"`
 	Quality         string   `json:"quality,omitempty" jsonschema:"description:Image quality preference: 'high' (2K resolution), 'medium' (1K), 'draft' (1K). Higher quality may take longer to generate.,default:high"`
@@ -116,9 +116,9 @@ type VeoTextToVideoInput struct {
 	NegativePrompt  string `json:"negative_prompt,omitempty" jsonschema:"description:Description of what should NOT appear in the video. Use to avoid unwanted content or styles."`
 	AspectRatio     string `json:"aspect_ratio,omitempty" jsonschema:"description:Video width-to-height ratio,default:16:9,enum:16:9,enum:9:16"`
 	Resolution      string `json:"resolution,omitempty" jsonschema:"description:Video resolution. Note: 1080p only supported for 16:9 aspect ratio,default:720p,enum:720p,enum:1080p"`
-	Model           string `json:"model,omitempty" jsonschema:"description:Veo model version to use,default:veo-3.0-generate-001,enum:veo-3.0-generate-001,enum:veo-3.0-fast-generate-001,enum:veo-2.0-generate-001"`
+	Model           string `json:"model,omitempty" jsonschema:"description:Veo model version to use,default:veo-3.1-generate-preview,enum:veo-3.1-generate-preview,enum:veo-3.1-fast-generate-preview,enum:veo-3.0-generate-preview,enum:veo-3.0-fast-generate-001"`
 	Seed            int    `json:"seed,omitempty" jsonschema:"description:Optional seed value for slight reproducibility in generation"`
-	OutputDirectory string `json:"output_directory,omitempty" jsonschema:"description:Local directory path where the 8-second MP4 video will be saved. Videos have 2-day retention on server and include SynthID watermark."`
+	OutputDirectory string `json:"output_directory,omitempty" jsonschema:"description:Local directory path where the MP4 video (4-8 seconds) will be saved. Videos have 2-day retention on server and include SynthID watermark."`
 }
 
 // Image-to-Video Generation
@@ -128,9 +128,9 @@ type VeoImageToVideoInput struct {
 	NegativePrompt  string `json:"negative_prompt,omitempty" jsonschema:"description:Description of what should NOT happen in the animation or appear in the video."`
 	AspectRatio     string `json:"aspect_ratio,omitempty" jsonschema:"description:Video width-to-height ratio,default:16:9,enum:16:9,enum:9:16"`
 	Resolution      string `json:"resolution,omitempty" jsonschema:"description:Video resolution. Note: 1080p only supported for 16:9 aspect ratio,default:720p,enum:720p,enum:1080p"`
-	Model           string `json:"model,omitempty" jsonschema:"description:Veo model version to use,default:veo-3.0-generate-001,enum:veo-3.0-generate-001,enum:veo-3.0-fast-generate-001,enum:veo-2.0-generate-001"`
+	Model           string `json:"model,omitempty" jsonschema:"description:Veo model version to use,default:veo-3.1-generate-preview,enum:veo-3.1-generate-preview,enum:veo-3.1-fast-generate-preview,enum:veo-3.0-generate-preview,enum:veo-3.0-fast-generate-001"`
 	Seed            int    `json:"seed,omitempty" jsonschema:"description:Optional seed value for slight reproducibility in generation"`
-	OutputDirectory string `json:"output_directory,omitempty" jsonschema:"description:Local directory path where the 8-second MP4 video will be saved. Videos have 2-day retention on server and include SynthID watermark."`
+	OutputDirectory string `json:"output_directory,omitempty" jsonschema:"description:Local directory path where the MP4 video (4-8 seconds) will be saved. Videos have 2-day retention on server and include SynthID watermark."`
 }
 
 // Legacy input type for backward compatibility
@@ -139,10 +139,10 @@ type VeoGenerationInput struct {
 	NegativePrompt  string `json:"negative_prompt,omitempty" jsonschema:"description:Description of what should NOT appear in the video. Use to avoid unwanted content or styles."`
 	AspectRatio     string `json:"aspect_ratio,omitempty" jsonschema:"description:Video width-to-height ratio,default:16:9,enum:16:9,enum:9:16"`
 	Resolution      string `json:"resolution,omitempty" jsonschema:"description:Video resolution. Note: 1080p only supported for 16:9 aspect ratio,default:720p,enum:720p,enum:1080p"`
-	Model           string `json:"model,omitempty" jsonschema:"description:Veo model version to use,default:veo-3.0-generate-001,enum:veo-3.0-generate-001,enum:veo-3.0-fast-generate-001,enum:veo-2.0-generate-001"`
+	Model           string `json:"model,omitempty" jsonschema:"description:Veo model version to use,default:veo-3.1-generate-preview,enum:veo-3.1-generate-preview,enum:veo-3.1-fast-generate-preview,enum:veo-3.0-generate-preview,enum:veo-3.0-fast-generate-001"`
 	ImagePath       string `json:"image_path,omitempty" jsonschema:"description:Optional path to initial image file to animate as the starting frame of the video"`
 	Seed            int    `json:"seed,omitempty" jsonschema:"description:Optional seed value for slight reproducibility in generation"`
-	OutputDirectory string `json:"output_directory,omitempty" jsonschema:"description:Local directory path where the 8-second MP4 video will be saved. Videos have 2-day retention on server and include SynthID watermark."`
+	OutputDirectory string `json:"output_directory,omitempty" jsonschema:"description:Local directory path where the MP4 video (4-8 seconds) will be saved. Videos have 2-day retention on server and include SynthID watermark."`
 }
 
 type VeoGenerationOutput struct {
@@ -795,7 +795,7 @@ func (s *Server) handleVeoGeneration(ctx context.Context, req *mcp.CallToolReque
 
 	model := input.Model
 	if model == "" {
-		model = "veo-3.0-generate-001"
+		model = "veo-3.1-generate-preview"
 	}
 
 	log.Printf("Generating video with model %s for prompt: %s (aspect: %s, resolution: %s)", model, input.Prompt, aspectRatio, resolution)
@@ -939,7 +939,7 @@ func (s *Server) handleVeoTextToVideo(ctx context.Context, req *mcp.CallToolRequ
 
 	model := input.Model
 	if model == "" {
-		model = "veo-3.0-generate-001"
+		model = "veo-3.1-generate-preview"
 	}
 
 	log.Printf("Generating text-to-video with model %s for prompt: %s (aspect: %s, resolution: %s)", model, input.Prompt, aspectRatio, resolution)
@@ -1098,7 +1098,7 @@ func (s *Server) handleVeoImageToVideo(ctx context.Context, req *mcp.CallToolReq
 
 	model := input.Model
 	if model == "" {
-		model = "veo-3.0-generate-001"
+		model = "veo-3.1-generate-preview"
 	}
 
 	log.Printf("Generating image-to-video with model %s for image: %s, prompt: %s (aspect: %s, resolution: %s)",

@@ -8,11 +8,11 @@
 - **🖼️ 图像生成**：使用 Gemini 3.0 Pro 模型进行高质量图像创作
 - **✏️ 图像编辑**：使用 Gemini AI 模型进行高级图像修改和增强
 - **🔀 多图像合成**：无缝混合和组合多张图像
-- **🎬 视频生成**：使用 Google 的 Veo 3.0 模型进行电影级视频创作（文本生成视频和图像生成视频）
+- **🎬 视频生成**：使用 Google 的 Veo 3.1 模型进行电影级视频创作，支持原生音频（文本生成视频和图像生成视频）
 
 ### **先进模型支持**
-- **Gemini 模型**：`gemini-3-pro-preview`（Gemini 3.0 Pro - 最新版本，具备高级推理能力）、`gemini-2.5-flash-image-preview`、`gemini-2.0-flash-preview`
-- **Veo 模型**：`veo-3.0-generate-001`、`veo-3.0-fast-generate-001`、`veo-2.0-generate-001`
+- **Gemini 模型**：`gemini-3-pro-image-preview`（默认 - Gemini 3 Pro 原生图像生成）、`gemini-2.5-flash-image`
+- **Veo 模型**：`veo-3.1-generate-preview`（默认 - 最新版本，支持原生音频）、`veo-3.1-fast-generate-preview`、`veo-3.0-generate-preview`、`veo-3.0-fast-generate-001`
 
 ### **MCP 协议功能**
 - **Stdio 传输**：直接与 MCP 客户端集成
@@ -200,14 +200,15 @@ echo '{"jsonrpc":"2.0","id":"1","method":"tools/list","params":{}}' | ./gemini-m
 - `output_directory`：本地保存路径
 
 ### 4. **veo_text_to_video**
-使用 Google 的 Veo 3.0 模型从文本提示生成 8 秒视频。
+使用 Google 的 Veo 3.1 模型从文本提示生成 4-8 秒视频，支持原生音频。
 
 **主要功能：**
 - 详细的场景描述和摄像机运动
 - 真实的物理效果和自然运动
+- 原生音频生成（对话、音效、音乐）
 - 支持 16:9/9:16 纵横比
 - 720p/1080p 分辨率选项
-- 负面提示用于内容排除
+- 灵活时长：4、6 或 8 秒
 - SynthID 水印
 
 **参数：**
@@ -215,12 +216,12 @@ echo '{"jsonrpc":"2.0","id":"1","method":"tools/list","params":{}}' | ./gemini-m
 - `negative_prompt`：视频中要避免的内容
 - `aspect_ratio`：视频比例（`16:9`、`9:16`）
 - `resolution`：视频质量（`720p`、`1080p`）
-- `model`：Veo 变体（默认：`veo-3.0-generate-001`）
+- `model`：Veo 变体（默认：`veo-3.1-generate-preview`）
 - `seed`：可选的种子值用于可重现性
 - `output_directory`：本地保存路径
 
 ### 6. **veo_image_to_video**
-使用 Google 的 Veo 3.0 模型将静态图像动画化为 8 秒视频。
+使用 Google 的 Veo 3.1 模型将静态图像动画化为 4-8 秒视频，支持原生音频。
 
 **主要功能：**
 - 将照片转换为动态场景
@@ -234,7 +235,7 @@ echo '{"jsonrpc":"2.0","id":"1","method":"tools/list","params":{}}' | ./gemini-m
 - `negative_prompt`：要避免的内容
 - `aspect_ratio`：视频比例（`16:9`、`9:16`）
 - `resolution`：视频质量（`720p`、`1080p`）
-- `model`：Veo 变体（默认：`veo-3.0-generate-001`）
+- `model`：Veo 变体（默认：`veo-3.1-generate-preview`）
 - `output_directory`：本地保存路径
 
 ### 7. **veo_generate_video**（旧版）
@@ -334,7 +335,7 @@ make clean  # 清理构建产物
 - **Gemini 集成**：使用 `google.golang.org/genai` 与 Gemini API 后端集成
 - **协议合规性**：实现 MCP 2024-11-05 规范
 - **图像生成**：完全实现 Gemini 3.0 Pro 模型
-- **视频生成**：完整的 Veo 3.0 集成，支持操作轮询和正确的文件下载
+- **视频生成**：完整的 Veo 3.1 集成，支持原生音频、操作轮询和正确的文件下载
 - **文件管理**：生成的内容保存时包含元数据和时间戳
 - **错误处理**：全面的错误响应机制，提供有用的错误信息
 - **多模态支持**：支持文本生成图像、图像生成图像、文本生成视频和图像生成视频工作流程
