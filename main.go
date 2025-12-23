@@ -579,6 +579,13 @@ func (s *Server) handleGeminiImageGeneration(ctx context.Context, req *mcp.CallT
 		}
 	}
 
+	// Clean up temporary files after building result (images are returned via MCP content)
+	for _, f := range savedFiles {
+		if err := os.Remove(f); err != nil {
+			log.Printf("Warning: failed to remove temp file %s: %v", f, err)
+		}
+	}
+
 	return result, GeminiImageGenerationOutput{
 		Description:   resultText,
 		Model:         model,
@@ -737,6 +744,13 @@ func (s *Server) handleGeminiImageEdit(ctx context.Context, req *mcp.CallToolReq
 		}
 	}
 
+	// Clean up temporary files after building result (images are returned via MCP content)
+	for _, f := range savedFiles {
+		if err := os.Remove(f); err != nil {
+			log.Printf("Warning: failed to remove temp file %s: %v", f, err)
+		}
+	}
+
 	return result, GeminiImageEditOutput{
 		OriginalImage: input.InputImagePath,
 		EditedImage:   editedImagePath,
@@ -886,6 +900,13 @@ func (s *Server) handleGeminiMultiImage(ctx context.Context, req *mcp.CallToolRe
 	if len(imageContents) > 0 {
 		result = &mcp.CallToolResult{
 			Content: imageContents,
+		}
+	}
+
+	// Clean up temporary files after building result (images are returned via MCP content)
+	for _, f := range savedFiles {
+		if err := os.Remove(f); err != nil {
+			log.Printf("Warning: failed to remove temp file %s: %v", f, err)
 		}
 	}
 

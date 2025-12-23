@@ -30,7 +30,7 @@ func LoadConfig() *Config {
 		Location:       getEnvOrDefault("GOOGLE_LOCATION", "us-central1"),
 		Port:           getEnvOrDefault("PORT", "8080"),
 		Transport:      getEnvOrDefault("TRANSPORT", "stdio"),
-		OutputDir:      getEnvOrDefault("OUTPUT_DIR", "./output"),
+		OutputDir:      getEnvOrDefault("OUTPUT_DIR", "/tmp/gemini-mcp"),
 		GenmediaBucket: os.Getenv("GENMEDIA_BUCKET"),
 		ServiceTokens:  parseServiceTokens(os.Getenv("SERVICE_TOKENS")),
 	}
