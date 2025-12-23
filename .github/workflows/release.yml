@@ -48,32 +48,42 @@ jobs:
         echo "BUILD_TIME=$(date -u '+%Y-%m-%d %H:%M:%S UTC')" >> $GITHUB_ENV
         echo "GIT_COMMIT=$(git rev-parse HEAD)" >> $GITHUB_ENV
 
-    - name: Build binary
+    - name: Build binaries
       run: |
         mkdir -p build
 
         if [ "${{ matrix.os }}" = "windows" ]; then
-          output="build/gemini-mcp-${{ matrix.os }}-${{ matrix.arch }}.exe"
+          ext=".exe"
         else
-          output="build/gemini-mcp-${{ matrix.os }}-${{ matrix.arch }}"
+          ext=""
         fi
 
-        echo "Building for ${{ matrix.os }}/${{ matrix.arch }}..."
+        gemini_output="build/gemini-mcp-${{ matrix.os }}-${{ matrix.arch }}${ext}"
+        upload_output="build/upload_media-${{ matrix.os }}-${{ matrix.arch }}${ext}"
 
+        echo "Building gemini-mcp for ${{ matrix.os }}/${{ matrix.arch }}..."
         GOOS=${{ matrix.os }} GOARCH=${{ matrix.arch }} CGO_ENABLED=0 go build \
           -ldflags "-X main.version=${VERSION} -X 'main.buildTime=${BUILD_TIME}' -X main.gitCommit=${GIT_COMMIT} -s -w" \
-          -o "$output" \
+          -o "$gemini_output" \
           main.go
 
-        # Create compressed archive
+        echo "Building upload_media for ${{ matrix.os }}/${{ matrix.arch }}..."
+        GOOS=${{ matrix.os }} GOARCH=${{ matrix.arch }} CGO_ENABLED=0 go build \
+          -ldflags "-X main.version=${VERSION} -X 'main.buildTime=${BUILD_TIME}' -X main.gitCommit=${GIT_COMMIT} -s -w" \
+          -o "$upload_output" \
+          ./cmd/upload_media
+
+        # Create compressed archives
         if [ "${{ matrix.os }}" = "windows" ]; then
-          (cd build && zip "gemini-mcp-${VERSION}-${{ matrix.os }}-${{ matrix.arch }}.zip" "$(basename "$output")")
+          (cd build && zip "gemini-mcp-${VERSION}-${{ matrix.os }}-${{ matrix.arch }}.zip" "$(basename "$gemini_output")")
+          (cd build && zip "upload_media-${VERSION}-${{ matrix.os }}-${{ matrix.arch }}.zip" "$(basename "$upload_output")")
         else
-          tar -czf "build/gemini-mcp-${VERSION}-${{ matrix.os }}-${{ matrix.arch }}.tar.gz" -C build "$(basename "$output")"
+          tar -czf "build/gemini-mcp-${VERSION}-${{ matrix.os }}-${{ matrix.arch }}.tar.gz" -C build "$(basename "$gemini_output")"
+          tar -czf "build/upload_media-${VERSION}-${{ matrix.os }}-${{ matrix.arch }}.tar.gz" -C build "$(basename "$upload_output")"
         fi
 
-        # Remove uncompressed binary
-        rm "$output"
+        # Remove uncompressed binaries
+        rm "$gemini_output" "$upload_output"
 
     - name: Upload artifacts
       uses: actions/upload-artifact@v4

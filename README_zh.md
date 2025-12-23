@@ -36,12 +36,16 @@
 
 ### 方式一：下载预编译二进制（推荐）
 
-从 [GitHub Releases](https://github.com/YOUR_USERNAME/gemini-mcp/releases) 下载适合您平台的最新版本：
+从 [GitHub Releases](https://github.com/holocode-ai/gemini-mcp/releases) 下载适合您平台的最新版本。
+
+每个发布版本包含两个二进制文件：
+- **gemini-mcp**：主 MCP 服务器
+- **upload_media**：用于上传本地文件到服务器的 CLI 工具（配合 HTTP 模式使用）
 
 **Linux (x86_64)**
 ```bash
 # 下载并解压
-wget https://github.com/YOUR_USERNAME/gemini-mcp/releases/latest/download/gemini-mcp-VERSION-linux-amd64.tar.gz
+wget https://github.com/holocode-ai/gemini-mcp/releases/latest/download/gemini-mcp-VERSION-linux-amd64.tar.gz
 tar -xzf gemini-mcp-VERSION-linux-amd64.tar.gz
 
 # 添加执行权限并移动到 PATH
@@ -51,7 +55,7 @@ sudo mv gemini-mcp-VERSION-linux-amd64 /usr/local/bin/gemini-mcp
 
 **Linux (ARM64)**
 ```bash
-wget https://github.com/YOUR_USERNAME/gemini-mcp/releases/latest/download/gemini-mcp-VERSION-linux-arm64.tar.gz
+wget https://github.com/holocode-ai/gemini-mcp/releases/latest/download/gemini-mcp-VERSION-linux-arm64.tar.gz
 tar -xzf gemini-mcp-VERSION-linux-arm64.tar.gz
 chmod +x gemini-mcp-VERSION-linux-arm64
 sudo mv gemini-mcp-VERSION-linux-arm64 /usr/local/bin/gemini-mcp
@@ -60,7 +64,7 @@ sudo mv gemini-mcp-VERSION-linux-arm64 /usr/local/bin/gemini-mcp
 **macOS (Intel)**
 ```bash
 # 下载并解压
-curl -LO https://github.com/YOUR_USERNAME/gemini-mcp/releases/latest/download/gemini-mcp-VERSION-darwin-amd64.tar.gz
+curl -LO https://github.com/holocode-ai/gemini-mcp/releases/latest/download/gemini-mcp-VERSION-darwin-amd64.tar.gz
 tar -xzf gemini-mcp-VERSION-darwin-amd64.tar.gz
 
 # 添加执行权限并移动到 PATH
@@ -70,7 +74,7 @@ sudo mv gemini-mcp-VERSION-darwin-amd64 /usr/local/bin/gemini-mcp
 
 **macOS (Apple Silicon)**
 ```bash
-curl -LO https://github.com/YOUR_USERNAME/gemini-mcp/releases/latest/download/gemini-mcp-VERSION-darwin-arm64.tar.gz
+curl -LO https://github.com/holocode-ai/gemini-mcp/releases/latest/download/gemini-mcp-VERSION-darwin-arm64.tar.gz
 tar -xzf gemini-mcp-VERSION-darwin-arm64.tar.gz
 chmod +x gemini-mcp-VERSION-darwin-arm64
 sudo mv gemini-mcp-VERSION-darwin-arm64 /usr/local/bin/gemini-mcp
@@ -285,6 +289,25 @@ curl -X POST http://localhost:8080 \
 - `negative_prompt`：内容排除
 - `output_directory`：本地保存路径
 
+### 8. **upload_media**
+获取使用 upload_media CLI 工具上传本地文件到 S3 存储的说明。在 HTTP 模式下使用图像编辑或视频生成工具时需要此功能。
+
+**主要功能：**
+- 将本地文件上传到 S3/MinIO 存储
+- 返回 object_key 供其他工具使用
+- 使用一次性认证令牌确保安全
+- 支持 PNG、JPEG、WebP 和视频格式
+
+**工作流程：**
+1. 调用 `upload_media` MCP 工具获取 CLI 说明和令牌
+2. 使用提供的令牌运行 `upload_media` CLI 上传文件
+3. 将返回的 `object_key` 用于 `gemini_image_edit`、`gemini_multi_image` 或 `veo_image_to_video`
+
+**CLI 使用方法：**
+```bash
+upload_media --server "http://localhost:8080/upload" --token "<一次性令牌>" /path/to/file.png
+```
+
 ## 🔧 环境配置
 
 | 变量 | 描述 | 默认值 | 必需 |
@@ -340,14 +363,19 @@ GOOGLE_API_KEY=your_api_key TRANSPORT=http PORT=8080 SERVICE_TOKENS=mytoken ./ge
   "mcpServers": {
     "gemini": {
       "type": "http",
-      "url": "http://localhost:8080",
+      "url": "http://localhost:8080/mcp",
       "headers": {
-        "Authorization": "Bearer mytoken"
+        "Authorization": "Bearer mytoken",
+        "X-Upload-Media-Path": "/path/to/upload_media"
       }
     }
   }
 }
 ```
+
+**Header 配置说明：**
+- `Authorization`：认证 Bearer 令牌（必须与 `SERVICE_TOKENS` 中的某个令牌匹配）
+- `X-Upload-Media-Path`：`upload_media` CLI 二进制文件的绝对路径。在 HTTP 模式下使用 `gemini_image_edit`、`gemini_multi_image` 或 `veo_image_to_video` 处理本地文件时必需。
 
 ### Cline VSCode 扩展
 ```json

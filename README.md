@@ -36,12 +36,16 @@ A comprehensive Model Context Protocol (MCP) server for Google Gemini AI service
 
 ### Option 1: Download Pre-built Binary (Recommended)
 
-Download the latest release for your platform from [GitHub Releases](https://github.com/YOUR_USERNAME/gemini-mcp/releases):
+Download the latest release for your platform from [GitHub Releases](https://github.com/holocode-ai/gemini-mcp/releases).
+
+Each release includes two binaries:
+- **gemini-mcp**: The main MCP server
+- **upload_media**: CLI tool for uploading local files to the server (used with HTTP mode)
 
 **Linux (x86_64)**
 ```bash
 # Download and extract
-wget https://github.com/YOUR_USERNAME/gemini-mcp/releases/latest/download/gemini-mcp-VERSION-linux-amd64.tar.gz
+wget https://github.com/holocode-ai/gemini-mcp/releases/latest/download/gemini-mcp-VERSION-linux-amd64.tar.gz
 tar -xzf gemini-mcp-VERSION-linux-amd64.tar.gz
 
 # Make executable and move to PATH
@@ -51,7 +55,7 @@ sudo mv gemini-mcp-VERSION-linux-amd64 /usr/local/bin/gemini-mcp
 
 **Linux (ARM64)**
 ```bash
-wget https://github.com/YOUR_USERNAME/gemini-mcp/releases/latest/download/gemini-mcp-VERSION-linux-arm64.tar.gz
+wget https://github.com/holocode-ai/gemini-mcp/releases/latest/download/gemini-mcp-VERSION-linux-arm64.tar.gz
 tar -xzf gemini-mcp-VERSION-linux-arm64.tar.gz
 chmod +x gemini-mcp-VERSION-linux-arm64
 sudo mv gemini-mcp-VERSION-linux-arm64 /usr/local/bin/gemini-mcp
@@ -60,7 +64,7 @@ sudo mv gemini-mcp-VERSION-linux-arm64 /usr/local/bin/gemini-mcp
 **macOS (Intel)**
 ```bash
 # Download and extract
-curl -LO https://github.com/YOUR_USERNAME/gemini-mcp/releases/latest/download/gemini-mcp-VERSION-darwin-amd64.tar.gz
+curl -LO https://github.com/holocode-ai/gemini-mcp/releases/latest/download/gemini-mcp-VERSION-darwin-amd64.tar.gz
 tar -xzf gemini-mcp-VERSION-darwin-amd64.tar.gz
 
 # Make executable and move to PATH
@@ -70,7 +74,7 @@ sudo mv gemini-mcp-VERSION-darwin-amd64 /usr/local/bin/gemini-mcp
 
 **macOS (Apple Silicon)**
 ```bash
-curl -LO https://github.com/YOUR_USERNAME/gemini-mcp/releases/latest/download/gemini-mcp-VERSION-darwin-arm64.tar.gz
+curl -LO https://github.com/holocode-ai/gemini-mcp/releases/latest/download/gemini-mcp-VERSION-darwin-arm64.tar.gz
 tar -xzf gemini-mcp-VERSION-darwin-arm64.tar.gz
 chmod +x gemini-mcp-VERSION-darwin-arm64
 sudo mv gemini-mcp-VERSION-darwin-arm64 /usr/local/bin/gemini-mcp
@@ -285,6 +289,25 @@ General video generation tool supporting both text-to-video and image-to-video c
 - `negative_prompt`: Content exclusion
 - `output_directory`: Local save path
 
+### 8. **upload_media**
+Get instructions for uploading local files to S3 storage using the upload_media CLI tool. This is required when using HTTP mode with image editing or video generation tools.
+
+**Key Features:**
+- Upload local files to S3/MinIO storage
+- Returns object_key for use with other tools
+- One-time authentication tokens for security
+- Supports PNG, JPEG, WebP, and video formats
+
+**Workflow:**
+1. Call `upload_media` MCP tool to get CLI instructions and token
+2. Run `upload_media` CLI with the provided token to upload your file
+3. Use the returned `object_key` with `gemini_image_edit`, `gemini_multi_image`, or `veo_image_to_video`
+
+**CLI Usage:**
+```bash
+upload_media --server "http://localhost:8080/upload" --token "<one-time-token>" /path/to/file.png
+```
+
 ## 🔧 Environment Configuration
 
 | Variable | Description | Default | Required |
@@ -340,14 +363,19 @@ Then configure Claude Desktop to connect via HTTP:
   "mcpServers": {
     "gemini": {
       "type": "http",
-      "url": "http://localhost:8080",
+      "url": "http://localhost:8080/mcp",
       "headers": {
-        "Authorization": "Bearer mytoken"
+        "Authorization": "Bearer mytoken",
+        "X-Upload-Media-Path": "/path/to/upload_media"
       }
     }
   }
 }
 ```
+
+**Header Configuration:**
+- `Authorization`: Bearer token for authentication (must match one of `SERVICE_TOKENS`)
+- `X-Upload-Media-Path`: Absolute path to the `upload_media` CLI binary. Required for using `gemini_image_edit`, `gemini_multi_image`, or `veo_image_to_video` with local files in HTTP mode.
 
 ### Cline VSCode Extension
 ```json

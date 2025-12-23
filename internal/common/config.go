@@ -130,3 +130,43 @@ func (c *Config) Validate() error {
 	}
 	return nil
 }
+
+// UploadConfig is a minimal config for the upload_media CLI
+type UploadConfig struct {
+	S3Endpoint        string
+	S3Bucket          string
+	S3Region          string
+	S3AccessKeyID     string
+	S3SecretAccessKey string
+	S3UseSSL          bool
+	S3PresignTTL      time.Duration
+	S3ObjectTTL       time.Duration
+}
+
+// LoadUploadConfig loads configuration for the upload_media CLI
+func LoadUploadConfig() *UploadConfig {
+	return &UploadConfig{
+		S3Endpoint:        os.Getenv("S3_ENDPOINT"),
+		S3Bucket:          getEnvOrDefault("S3_BUCKET", "gemini-media"),
+		S3Region:          getEnvOrDefault("S3_REGION", "us-east-1"),
+		S3AccessKeyID:     os.Getenv("S3_ACCESS_KEY_ID"),
+		S3SecretAccessKey: os.Getenv("S3_SECRET_ACCESS_KEY"),
+		S3UseSSL:          getEnvOrDefaultBool("S3_USE_SSL", true),
+		S3PresignTTL:      getEnvOrDefaultDuration("S3_PRESIGN_TTL", 24*time.Hour),
+		S3ObjectTTL:       getEnvOrDefaultDuration("S3_OBJECT_TTL", 24*time.Hour),
+	}
+}
+
+// Validate validates configuration for the upload CLI
+func (c *UploadConfig) Validate() error {
+	if c.S3Endpoint == "" {
+		return fmt.Errorf("S3_ENDPOINT environment variable is required")
+	}
+	if c.S3AccessKeyID == "" {
+		return fmt.Errorf("S3_ACCESS_KEY_ID environment variable is required")
+	}
+	if c.S3SecretAccessKey == "" {
+		return fmt.Errorf("S3_SECRET_ACCESS_KEY environment variable is required")
+	}
+	return nil
+}

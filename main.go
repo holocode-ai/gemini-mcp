@@ -2,7 +2,8 @@ package main
 
 import (
 	"context"
-	"encoding/base64"
+	"crypto/rand"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
@@ -10,7 +11,9 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -38,10 +41,91 @@ const (
 	serviceName = "gemini-mcp"
 )
 
+// TempToken represents a one-time use temporary token
+type TempToken struct {
+	Token     string
+	ExpiresAt time.Time
+}
+
+// TokenManager manages temporary one-time tokens
+type TokenManager struct {
+	tokens map[string]*TempToken // token -> TempToken
+	mu     sync.RWMutex
+	ttl    time.Duration
+}
+
+// NewTokenManager creates a new token manager with specified TTL
+func NewTokenManager(ttl time.Duration) *TokenManager {
+	tm := &TokenManager{
+		tokens: make(map[string]*TempToken),
+		ttl:    ttl,
+	}
+	// Start cleanup goroutine
+	go tm.cleanupExpired()
+	return tm
+}
+
+// Generate creates a new one-time token
+func (tm *TokenManager) Generate() string {
+	tm.mu.Lock()
+	defer tm.mu.Unlock()
+
+	// Generate random token
+	b := make([]byte, 32)
+	rand.Read(b)
+	token := fmt.Sprintf("%x", b)
+
+	tm.tokens[token] = &TempToken{
+		Token:     token,
+		ExpiresAt: time.Now().Add(tm.ttl),
+	}
+
+	return token
+}
+
+// Validate checks if token is valid and consumes it (one-time use)
+func (tm *TokenManager) Validate(token string) bool {
+	tm.mu.Lock()
+	defer tm.mu.Unlock()
+
+	t, exists := tm.tokens[token]
+	if !exists {
+		return false
+	}
+
+	// Check expiration
+	if time.Now().After(t.ExpiresAt) {
+		delete(tm.tokens, token)
+		return false
+	}
+
+	// Consume token (one-time use)
+	delete(tm.tokens, token)
+	return true
+}
+
+// cleanupExpired periodically removes expired tokens
+func (tm *TokenManager) cleanupExpired() {
+	ticker := time.NewTicker(1 * time.Hour)
+	defer ticker.Stop()
+
+	for range ticker.C {
+		tm.mu.Lock()
+		now := time.Now()
+		for token, t := range tm.tokens {
+			if now.After(t.ExpiresAt) {
+				delete(tm.tokens, token)
+			}
+		}
+		tm.mu.Unlock()
+	}
+}
+
 type Server struct {
-	config  *common.Config
-	client  *genai.Client
-	storage storage.Storage
+	config       *common.Config
+	client       *genai.Client
+	storage      storage.Storage
+	tokenManager *TokenManager
 }
 
 // Input types for tools
@@ -50,7 +134,8 @@ type GeminiImageGenerationInput struct {
 	Model           string   `json:"model,omitempty" jsonschema:"description:Image generation model to use. Supported models: 'gemini-3-pro-image-preview' (default - Gemini 3 Pro with native image generation), 'gemini-2.5-flash-image' (fast Gemini image model).,default:gemini-3-pro-image-preview"`
 	Style           string   `json:"style,omitempty" jsonschema:"description:Image style preference such as 'photorealistic', 'artistic', 'cartoon', 'sketch', 'oil painting', 'watercolor', etc."`
 	AspectRatio     string   `json:"aspect_ratio,omitempty" jsonschema:"description:Preferred aspect ratio for the image. Supported ratios: '1:1' (square), '3:4', '4:3', '9:16' (portrait), '16:9' (landscape)"`
-	Quality         string   `json:"quality,omitempty" jsonschema:"description:Image quality preference: 'high' (2K resolution), 'medium' (1K), 'draft' (1K). Higher quality may take longer to generate.,default:high"`
+	ImageSize       string   `json:"image_size,omitempty" jsonschema:"description:Resolution of the generated image. Must use uppercase 'K'. Supported values: '1K' (default), '2K', '4K'. Higher resolution costs more and takes longer to generate.,default:1K,enum:1K,enum:2K,enum:4K"`
+	Quality         string   `json:"quality,omitempty" jsonschema:"description:Image quality preference: 'high' (detailed), 'medium', 'draft'. Note: For resolution control, use image_size parameter instead.,default:high"`
 	SafetyLevel     string   `json:"safety_level,omitempty" jsonschema:"description:Content safety level: 'strict', 'moderate', 'permissive'. Controls content filtering.,default:moderate"`
 	Language        string   `json:"language,omitempty" jsonschema:"description:Language for prompt processing. Supported: 'en' (English), 'es-MX' (Spanish Mexico), 'ja' (Japanese), 'zh' (Chinese), 'hi' (Hindi),default:en"`
 	IncludeText     bool     `json:"include_text,omitempty" jsonschema:"description:Whether to include high-fidelity text rendering in the image. Enable for images that need clear text elements.,default:false"`
@@ -63,6 +148,7 @@ type GeminiImageGenerationOutput struct {
 	Model         string            `json:"model"`
 	Style         string            `json:"style,omitempty"`
 	AspectRatio   string            `json:"aspect_ratio,omitempty"`
+	ImageSize     string            `json:"image_size,omitempty"`
 	Quality       string            `json:"quality,omitempty"`
 	Language      string            `json:"language,omitempty"`
 	Tags          []string          `json:"tags,omitempty"`
@@ -146,21 +232,17 @@ type VeoImageToVideoInput struct {
 }
 
 // Upload Media Input/Output types
+// UploadMediaInput - this tool now returns CLI usage instructions instead of performing uploads directly
 type UploadMediaInput struct {
-	Data     string `json:"data,omitempty" jsonschema:"description:Base64 encoded media data (image or video). Required if url is not provided."`
-	URL      string `json:"url,omitempty" jsonschema:"description:URL of the media to download and upload. Required if data is not provided."`
-	MIMEType string `json:"mime_type" jsonschema:"description:MIME type of the media (e.g., 'image/png', 'image/jpeg', 'video/mp4'). Required."`
-	Prefix   string `json:"prefix,omitempty" jsonschema:"description:Optional prefix for the stored object key (default: 'upload')"`
+	// No input parameters required - this tool returns CLI guidance
 }
 
+// UploadMediaOutput provides CLI usage instructions for uploading files
 type UploadMediaOutput struct {
-	ObjectKey    string `json:"object_key"`
-	DownloadURL  string `json:"download_url,omitempty"`
-	ExpiresAt    string `json:"expires_at,omitempty"`
-	MIMEType     string `json:"mime_type"`
-	Size         int64  `json:"size"`
-	Message      string `json:"message"`
-	UploadedAt   string `json:"uploaded_at"`
+	Instructions string `json:"instructions"`
+	CLIPath      string `json:"cli_path"`
+	Usage        string `json:"usage"`
+	Example      string `json:"example"`
 }
 
 // Legacy input type for backward compatibility
@@ -234,9 +316,10 @@ func main() {
 	defer stor.Close()
 
 	server := &Server{
-		config:  config,
-		client:  client,
-		storage: stor,
+		config:       config,
+		client:       client,
+		storage:      stor,
+		tokenManager: NewTokenManager(12 * time.Hour), // 12-hour TTL for temp tokens
 	}
 
 	// Create MCP server
@@ -267,7 +350,7 @@ func main() {
 	switch config.Transport {
 	case "http", "sse":
 		// HTTP/SSE Transport using StreamableHTTPHandler
-		if err := runHTTPServer(ctx, mcpServer, config); err != nil {
+		if err := runHTTPServer(ctx, mcpServer, config, server); err != nil {
 			log.Fatalf("HTTP server error: %v", err)
 		}
 	case "stdio":
@@ -281,20 +364,35 @@ func main() {
 }
 
 // runHTTPServer starts the MCP server with HTTP transport
-func runHTTPServer(ctx context.Context, mcpServer *mcp.Server, config *common.Config) error {
-	// Create StreamableHTTPHandler
-	handler := mcp.NewStreamableHTTPHandler(func(req *http.Request) *mcp.Server {
+func runHTTPServer(ctx context.Context, mcpServer *mcp.Server, config *common.Config, appServer *Server) error {
+	// Create StreamableHTTPHandler for MCP
+	mcpHandler := mcp.NewStreamableHTTPHandler(func(req *http.Request) *mcp.Server {
 		return mcpServer
 	}, nil)
 
-	// Wrap with authentication middleware if tokens are configured
-	var httpHandler http.Handler = handler
+	// Wrap MCP handler with headers middleware
+	var wrappedMCPHandler http.Handler = mcpHandler
+	wrappedMCPHandler = middleware.HeadersMiddleware(wrappedMCPHandler)
+
+	// Wrap MCP handler with auth middleware if enabled
 	if config.AuthEnabled && len(config.ServiceTokens) > 0 {
 		log.Printf("Authentication enabled with %d configured tokens", len(config.ServiceTokens))
-		httpHandler = middleware.AuthMiddleware(config.ServiceTokens, handler)
+		wrappedMCPHandler = middleware.AuthMiddleware(config.ServiceTokens, wrappedMCPHandler)
 	} else {
-		log.Printf("WARNING: Authentication disabled - server is publicly accessible")
+		log.Printf("WARNING: Authentication disabled for MCP - server is publicly accessible")
 	}
+
+	// Create router
+	mux := http.NewServeMux()
+
+	// Register MCP endpoint (with auth middleware)
+	mux.Handle("/mcp", wrappedMCPHandler)
+	mux.Handle("/mcp/", wrappedMCPHandler)
+
+	// Register upload endpoint (uses one-time token auth, not service tokens)
+	mux.HandleFunc("/upload", appServer.handleHTTPUpload)
+
+	var httpHandler http.Handler = mux
 
 	// Create HTTP server with graceful shutdown support
 	addr := ":" + config.Port
@@ -369,13 +467,31 @@ func (s *Server) registerTools(server *mcp.Server) {
 	// Register gemini_image_edit tool
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "gemini_image_edit",
-		Description: "Edit existing images using Google's Gemini AI models. Supports targeted image modifications, style transfers, object addition/removal, and background changes. Provides precise control over edit types and can preserve original image characteristics while making specific alterations.\n\nIMPORTANT: The input_image_path must be either:\n1. An object_key returned by the upload_media tool (e.g., '2024/12/23/upload_abc123.png')\n2. An object_key from a previous gemini_image_generation result (found in saved_files)\n\nTo edit a user's local image, first use upload_media to upload it via base64, then use the returned object_key here.",
+		Description: `Edit existing images using Google's Gemini AI models. Supports targeted image modifications, style transfers, object addition/removal, and background changes.
+
+IMPORTANT - How to provide input_image_path:
+1. For LOCAL files: First call upload_media tool to get CLI instructions, then run the CLI to upload and get object_key
+2. For GENERATED images: Use the object_key from gemini_image_generation result (found in saved_files)
+
+Example workflow for local files:
+1. Call upload_media tool -> get CLI command with path
+2. Run CLI via Bash -> get object_key from JSON output
+3. Call gemini_image_edit with input_image_path=object_key`,
 	}, s.handleGeminiImageEdit)
 
 	// Register gemini_multi_image tool
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "gemini_multi_image",
-		Description: "Combine and blend multiple images using Google's Gemini AI models. Supports merging 2-3 images into cohesive compositions, creating collages, overlays, and seamless blends. Ideal for character consistency across scenes, style unification, and creative image compositions.\n\nIMPORTANT: Each input_image_path must be either:\n1. An object_key returned by the upload_media tool (e.g., '2024/12/23/upload_abc123.png')\n2. An object_key from a previous gemini_image_generation result (found in saved_files)\n\nTo use local images, first upload each via upload_media with base64 data, then use the returned object_keys here.",
+		Description: `Combine and blend multiple images using Google's Gemini AI models. Supports merging 2-3 images into cohesive compositions, creating collages, overlays, and seamless blends.
+
+IMPORTANT - How to provide input_image_paths:
+1. For LOCAL files: First call upload_media tool for EACH image to get CLI instructions, then run the CLI to upload and get object_keys
+2. For GENERATED images: Use object_keys from gemini_image_generation results (found in saved_files)
+
+Example workflow for local files:
+1. Call upload_media tool -> get CLI command with path
+2. Run CLI via Bash for each image -> get object_keys from JSON outputs
+3. Call gemini_multi_image with input_image_paths=[object_key1, object_key2]`,
 	}, s.handleGeminiMultiImage)
 
 	// Register veo_text_to_video tool
@@ -387,7 +503,16 @@ func (s *Server) registerTools(server *mcp.Server) {
 	// Register veo_image_to_video tool
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "veo_image_to_video",
-		Description: "Animate static images into 8-second videos using Google's Veo 3.0 models. Transform photos into dynamic scenes with natural motion, camera movements, and realistic physics. Input image becomes the starting frame of the generated video.\n\nIMPORTANT: The image_path must be either:\n1. An object_key returned by the upload_media tool (e.g., '2024/12/23/upload_abc123.png')\n2. An object_key from a previous gemini_image_generation result (found in saved_files)\n\nTo animate a user's local image, first use upload_media to upload it via base64, then use the returned object_key here.",
+		Description: `Animate static images into 8-second videos using Google's Veo 3.0 models. Transform photos into dynamic scenes with natural motion, camera movements, and realistic physics.
+
+IMPORTANT - How to provide image_path:
+1. For LOCAL files: First call upload_media tool to get CLI instructions, then run the CLI to upload and get object_key
+2. For GENERATED images: Use the object_key from gemini_image_generation result (found in saved_files)
+
+Example workflow for local files:
+1. Call upload_media tool -> get CLI command with path
+2. Run CLI via Bash -> get object_key from JSON output
+3. Call veo_image_to_video with image_path=object_key`,
 	}, s.handleVeoImageToVideo)
 
 	// Register veo_generate_video tool (legacy)
@@ -396,23 +521,20 @@ func (s *Server) registerTools(server *mcp.Server) {
 		Description: "Generate high-quality 8-second videos using Google's Veo 3.0 video generation models. Supports both text-to-video and image-to-video creation with advanced scene composition, camera movements, and realistic physics. Features include 16:9 and 9:16 aspect ratios, 720p/1080p resolution, negative prompts for content exclusion, and automatic operation polling with video URL retrieval.",
 	}, s.handleVeoGeneration)
 
-	// Register upload_media tool
+	// Register upload_media tool (guidance only - actual upload done via CLI)
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "upload_media",
-		Description: `Upload images or videos to storage for use with edit operations. Returns an object_key that can be used with gemini_image_edit, gemini_multi_image, and veo_image_to_video tools.
+		Description: `Get instructions for uploading local files to S3 storage using the upload_media CLI tool.
 
-INPUT METHODS:
-1. base64 data: Encode the image to base64 and pass via 'data' parameter with 'mime_type'.
-2. URL: Pass a publicly accessible URL via 'url' parameter with 'mime_type'.
+This tool returns usage instructions for the upload_media CLI. It does NOT perform the upload directly.
 
-BEST PRACTICE FOR BASE64 UPLOAD:
-Use bash to encode and write to a temp file, then pass the content directly:
-  base64 -i /path/to/image.png > /tmp/img_b64.txt
-Then call upload_media with the base64 content as 'data' parameter.
+WORKFLOW:
+1. Call this tool to get the CLI usage instructions
+2. Use Bash to run: upload_media /absolute/path/to/file.png
+3. Parse the JSON output to get the object_key
+4. Use the object_key with gemini_image_edit, gemini_multi_image, or veo_image_to_video tools
 
-IMPORTANT: Do NOT cat/read the base64 file into your context - it's too large. Pass the base64 string directly to the tool parameter.
-
-Files are stored with the same TTL as generated content. MIME type is required.`,
+The upload_media CLI must be installed locally and S3 environment variables configured.`,
 	}, s.handleUploadMedia)
 
 }
@@ -443,7 +565,18 @@ func (s *Server) handleGeminiImageGeneration(ctx context.Context, req *mcp.CallT
 		language = "en"
 	}
 
-	log.Printf("Generating image with model %s for prompt: %s (style: %s, quality: %s)", model, input.Prompt, style, quality)
+	// Determine image size - prioritize explicit image_size, fallback to quality-based
+	imageSize := input.ImageSize
+	if imageSize == "" {
+		// Fallback: map quality to image size for backward compatibility
+		// Quality: "high" -> "2K", "medium" -> "1K", "draft" -> "1K"
+		imageSize = "1K" // Default
+		if quality == "high" {
+			imageSize = "2K"
+		}
+	}
+
+	log.Printf("Generating image with model %s for prompt: %s (style: %s, quality: %s, image_size: %s)", model, input.Prompt, style, quality, imageSize)
 
 	// Build enhanced prompt with style and parameters
 	var promptParts []string
@@ -462,13 +595,6 @@ func (s *Server) handleGeminiImageGeneration(ctx context.Context, req *mcp.CallT
 	}
 
 	promptText := strings.Join(promptParts, ", ")
-
-	// Map quality to image size
-	// Quality: "high" -> "2K", "medium" -> "1K", "draft" -> "1K"
-	imageSize := "2K"
-	if quality == "medium" || quality == "draft" {
-		imageSize = "1K"
-	}
 
 	var savedFiles []string
 	var downloadURLs []string
@@ -681,6 +807,7 @@ func (s *Server) handleGeminiImageGeneration(ctx context.Context, req *mcp.CallT
 		Model:         model,
 		Style:         style,
 		AspectRatio:   input.AspectRatio,
+		ImageSize:     imageSize,
 		Quality:       quality,
 		Language:      language,
 		Tags:          input.Tags,
@@ -1539,96 +1666,168 @@ func (s *Server) handleVeoImageToVideo(ctx context.Context, req *mcp.CallToolReq
 	}, nil
 }
 
-func (s *Server) handleUploadMedia(ctx context.Context, req *mcp.CallToolRequest, input UploadMediaInput) (*mcp.CallToolResult, UploadMediaOutput, error) {
-	if input.Data == "" && input.URL == "" {
-		return nil, UploadMediaOutput{}, fmt.Errorf("one of 'data' (base64) or 'url' is required")
+// handleHTTPUpload handles file upload via HTTP POST /upload endpoint
+func (s *Server) handleHTTPUpload(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, `{"error":"Method not allowed"}`, http.StatusMethodNotAllowed)
+		return
 	}
 
-	if input.MIMEType == "" {
-		return nil, UploadMediaOutput{}, fmt.Errorf("mime_type is required")
+	// Validate one-time temporary token
+	authHeader := r.Header.Get("Authorization")
+	if authHeader == "" {
+		http.Error(w, `{"error":"Authorization header required"}`, http.StatusUnauthorized)
+		return
 	}
 
-	var data []byte
-	var err error
-	mimeType := input.MIMEType
+	token := strings.TrimPrefix(authHeader, "Bearer ")
+	token = strings.TrimSpace(token)
 
-	if input.Data != "" {
-		// Decode base64 data
-		data, err = base64.StdEncoding.DecodeString(input.Data)
-		if err != nil {
-			return nil, UploadMediaOutput{}, fmt.Errorf("failed to decode base64 data: %v", err)
-		}
-		log.Printf("Uploading %d bytes of %s data", len(data), mimeType)
-	} else {
-		// Download from URL
-		log.Printf("Downloading media from URL: %s", input.URL)
-		resp, err := http.Get(input.URL)
-		if err != nil {
-			return nil, UploadMediaOutput{}, fmt.Errorf("failed to download from URL: %v", err)
-		}
-		defer resp.Body.Close()
-
-		if resp.StatusCode != http.StatusOK {
-			return nil, UploadMediaOutput{}, fmt.Errorf("failed to download from URL: status %d", resp.StatusCode)
-		}
-
-		data, err = io.ReadAll(resp.Body)
-		if err != nil {
-			return nil, UploadMediaOutput{}, fmt.Errorf("failed to read response body: %v", err)
-		}
-		log.Printf("Downloaded %d bytes from URL", len(data))
+	if !s.tokenManager.Validate(token) {
+		http.Error(w, `{"error":"Invalid or expired token. Tokens are one-time use only."}`, http.StatusUnauthorized)
+		return
 	}
 
-	prefix := input.Prefix
-	if prefix == "" {
-		prefix = "upload"
+	// Parse multipart form (max 100MB)
+	if err := r.ParseMultipartForm(100 << 20); err != nil {
+		log.Printf("Failed to parse multipart form: %v", err)
+		http.Error(w, fmt.Sprintf(`{"error":"Failed to parse form: %v"}`, err), http.StatusBadRequest)
+		return
 	}
+
+	// Get file from form
+	file, header, err := r.FormFile("file")
+	if err != nil {
+		log.Printf("Failed to get file from form: %v", err)
+		http.Error(w, `{"error":"No file provided. Use multipart form with 'file' field."}`, http.StatusBadRequest)
+		return
+	}
+	defer file.Close()
+
+	// Read file data
+	data, err := io.ReadAll(file)
+	if err != nil {
+		log.Printf("Failed to read file: %v", err)
+		http.Error(w, fmt.Sprintf(`{"error":"Failed to read file: %v"}`, err), http.StatusInternalServerError)
+		return
+	}
+
+	// Detect MIME type from filename or Content-Type
+	mimeType := header.Header.Get("Content-Type")
+	if mimeType == "" || mimeType == "application/octet-stream" {
+		ext := strings.ToLower(filepath.Ext(header.Filename))
+		switch ext {
+		case ".png":
+			mimeType = "image/png"
+		case ".jpg", ".jpeg":
+			mimeType = "image/jpeg"
+		case ".gif":
+			mimeType = "image/gif"
+		case ".webp":
+			mimeType = "image/webp"
+		case ".mp4":
+			mimeType = "video/mp4"
+		case ".webm":
+			mimeType = "video/webm"
+		case ".mov":
+			mimeType = "video/quicktime"
+		default:
+			mimeType = "application/octet-stream"
+		}
+	}
+
+	log.Printf("Uploading file: %s (%s, %d bytes)", header.Filename, mimeType, len(data))
 
 	// Store via storage interface
-	result, err := s.storage.Store(ctx, data, mimeType, prefix)
+	ctx := r.Context()
+	result, err := s.storage.Store(ctx, data, mimeType, "upload")
 	if err != nil {
-		return nil, UploadMediaOutput{}, fmt.Errorf("failed to store media: %v", err)
+		log.Printf("Failed to store file: %v", err)
+		http.Error(w, fmt.Sprintf(`{"error":"Failed to store file: %v"}`, err), http.StatusInternalServerError)
+		return
 	}
 
-	log.Printf("Stored uploaded media: %s", result.ObjectKey)
+	log.Printf("File uploaded successfully: %s", result.ObjectKey)
 
+	// Build response
 	timestamp := time.Now().Format("20060102_150405")
 	var expiresAt string
-	var downloadURL string
-
-	if s.storage.IsRemote() {
-		downloadURL = result.Location
-		if result.ExpiresAt != nil {
-			expiresAt = result.ExpiresAt.Format(time.RFC3339)
-		}
+	if result.ExpiresAt != nil {
+		expiresAt = result.ExpiresAt.Format(time.RFC3339)
 	}
 
-	// Build result message
-	var contentText string
-	if s.storage.IsRemote() {
-		contentText = fmt.Sprintf("Media uploaded successfully.\nObject Key: %s\nDownload URL: %s", result.ObjectKey, downloadURL)
-		if expiresAt != "" {
-			contentText += fmt.Sprintf("\nURL expires at: %s", expiresAt)
-		}
-	} else {
-		contentText = fmt.Sprintf("Media uploaded successfully.\nStored at: %s", result.Location)
+	response := map[string]interface{}{
+		"object_key":   result.ObjectKey,
+		"download_url": result.Location,
+		"mime_type":    mimeType,
+		"size":         result.Size,
+		"message":      "Upload successful",
+		"uploaded_at":  timestamp,
+	}
+	if expiresAt != "" {
+		response["expires_at"] = expiresAt
 	}
 
-	contentText += fmt.Sprintf("\n\nUse object_key '%s' with gemini_image_edit, gemini_multi_image, or veo_image_to_video tools.", result.ObjectKey)
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(response)
+}
+
+func (s *Server) handleUploadMedia(ctx context.Context, req *mcp.CallToolRequest, input UploadMediaInput) (*mcp.CallToolResult, UploadMediaOutput, error) {
+	// Get values from request headers (injected by HeadersMiddleware)
+	cliPath := middleware.GetUploadMediaPath(ctx)
+	serverURL := middleware.GetServerURL(ctx)
+
+	// Validate required values
+	if cliPath == "" {
+		return nil, UploadMediaOutput{}, fmt.Errorf("X-Upload-Media-Path header is required. Please configure it in your MCP client settings")
+	}
+	if serverURL == "" {
+		serverURL = "http://localhost:8080" // Fallback
+	}
+
+	uploadURL := serverURL + "/upload"
+
+	// Generate one-time temporary token (12-hour TTL, consumed on use)
+	tempToken := s.tokenManager.Generate()
+
+	// Build instructions
+	instructions := fmt.Sprintf(`To upload a local file, use the upload_media CLI tool.
+
+COMMAND:
+  %s --server "%s" --token "%s" <file_path>
+
+EXAMPLE:
+  %s --server "%s" --token "%s" /Users/example/photo.png
+
+NOTE: The token is ONE-TIME USE only. After uploading, the token will be invalidated.
+
+The CLI will output JSON with the upload result:
+  {
+    "object_key": "2024/12/23/upload_abc123.png",
+    "download_url": "https://...",
+    "mime_type": "image/png",
+    "size": 12345,
+    "message": "Upload successful"
+  }
+
+Use the object_key from the output with:
+  - gemini_image_edit (input_image_path)
+  - gemini_multi_image (input_image_paths)
+  - veo_image_to_video (image_path)
+`, cliPath, uploadURL, tempToken, cliPath, uploadURL, tempToken)
+
+	output := UploadMediaOutput{
+		Instructions: instructions,
+		CLIPath:      cliPath,
+		Usage:        fmt.Sprintf("%s --server <url> --token <token> <file_path>", cliPath),
+		Example:      fmt.Sprintf("%s --server \"%s\" --token \"%s\" /Users/example/photo.png", cliPath, uploadURL, tempToken),
+	}
 
 	return &mcp.CallToolResult{
 		Content: []mcp.Content{
 			&mcp.TextContent{
-				Text: contentText,
+				Text: instructions,
 			},
 		},
-	}, UploadMediaOutput{
-		ObjectKey:   result.ObjectKey,
-		DownloadURL: downloadURL,
-		ExpiresAt:   expiresAt,
-		MIMEType:    mimeType,
-		Size:        result.Size,
-		Message:     "Media uploaded successfully",
-		UploadedAt:  timestamp,
-	}, nil
+	}, output, nil
 }
