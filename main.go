@@ -147,7 +147,7 @@ type VeoImageToVideoInput struct {
 
 // Upload Media Input/Output types
 type UploadMediaInput struct {
-	Data     string `json:"data" jsonschema:"description:Base64 encoded media data (image or video). Required if url is not provided."`
+	Data     string `json:"data,omitempty" jsonschema:"description:Base64 encoded media data (image or video). Required if url is not provided."`
 	URL      string `json:"url,omitempty" jsonschema:"description:URL of the media to download and upload. Required if data is not provided."`
 	MIMEType string `json:"mime_type" jsonschema:"description:MIME type of the media (e.g., 'image/png', 'image/jpeg', 'video/mp4'). Required."`
 	Prefix   string `json:"prefix,omitempty" jsonschema:"description:Optional prefix for the stored object key (default: 'upload')"`
@@ -369,13 +369,13 @@ func (s *Server) registerTools(server *mcp.Server) {
 	// Register gemini_image_edit tool
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "gemini_image_edit",
-		Description: "Edit existing images using Google's Gemini AI models. Supports targeted image modifications, style transfers, object addition/removal, and background changes. Provides precise control over edit types and can preserve original image characteristics while making specific alterations.",
+		Description: "Edit existing images using Google's Gemini AI models. Supports targeted image modifications, style transfers, object addition/removal, and background changes. Provides precise control over edit types and can preserve original image characteristics while making specific alterations.\n\nIMPORTANT: The input_image_path must be either:\n1. An object_key returned by the upload_media tool (e.g., '2024/12/23/upload_abc123.png')\n2. An object_key from a previous gemini_image_generation result (found in saved_files)\n\nTo edit a user's local image, first use upload_media to upload it via base64, then use the returned object_key here.",
 	}, s.handleGeminiImageEdit)
 
 	// Register gemini_multi_image tool
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "gemini_multi_image",
-		Description: "Combine and blend multiple images using Google's Gemini AI models. Supports merging 2-3 images into cohesive compositions, creating collages, overlays, and seamless blends. Ideal for character consistency across scenes, style unification, and creative image compositions.",
+		Description: "Combine and blend multiple images using Google's Gemini AI models. Supports merging 2-3 images into cohesive compositions, creating collages, overlays, and seamless blends. Ideal for character consistency across scenes, style unification, and creative image compositions.\n\nIMPORTANT: Each input_image_path must be either:\n1. An object_key returned by the upload_media tool (e.g., '2024/12/23/upload_abc123.png')\n2. An object_key from a previous gemini_image_generation result (found in saved_files)\n\nTo use local images, first upload each via upload_media with base64 data, then use the returned object_keys here.",
 	}, s.handleGeminiMultiImage)
 
 	// Register veo_text_to_video tool
@@ -387,7 +387,7 @@ func (s *Server) registerTools(server *mcp.Server) {
 	// Register veo_image_to_video tool
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "veo_image_to_video",
-		Description: "Animate static images into 8-second videos using Google's Veo 3.0 models. Transform photos into dynamic scenes with natural motion, camera movements, and realistic physics. Input image becomes the starting frame of the generated video.",
+		Description: "Animate static images into 8-second videos using Google's Veo 3.0 models. Transform photos into dynamic scenes with natural motion, camera movements, and realistic physics. Input image becomes the starting frame of the generated video.\n\nIMPORTANT: The image_path must be either:\n1. An object_key returned by the upload_media tool (e.g., '2024/12/23/upload_abc123.png')\n2. An object_key from a previous gemini_image_generation result (found in saved_files)\n\nTo animate a user's local image, first use upload_media to upload it via base64, then use the returned object_key here.",
 	}, s.handleVeoImageToVideo)
 
 	// Register veo_generate_video tool (legacy)
@@ -399,7 +399,20 @@ func (s *Server) registerTools(server *mcp.Server) {
 	// Register upload_media tool
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "upload_media",
-		Description: "Upload images or videos to storage for use with edit operations. Accepts base64 encoded data or a URL. Returns an object_key that can be used with gemini_image_edit, gemini_multi_image, and veo_image_to_video tools. Files are stored with the same TTL as generated content.",
+		Description: `Upload images or videos to storage for use with edit operations. Returns an object_key that can be used with gemini_image_edit, gemini_multi_image, and veo_image_to_video tools.
+
+INPUT METHODS:
+1. base64 data: Encode the image to base64 and pass via 'data' parameter with 'mime_type'.
+2. URL: Pass a publicly accessible URL via 'url' parameter with 'mime_type'.
+
+BEST PRACTICE FOR BASE64 UPLOAD:
+Use bash to encode and write to a temp file, then pass the content directly:
+  base64 -i /path/to/image.png > /tmp/img_b64.txt
+Then call upload_media with the base64 content as 'data' parameter.
+
+IMPORTANT: Do NOT cat/read the base64 file into your context - it's too large. Pass the base64 string directly to the tool parameter.
+
+Files are stored with the same TTL as generated content. MIME type is required.`,
 	}, s.handleUploadMedia)
 
 }
@@ -1528,14 +1541,16 @@ func (s *Server) handleVeoImageToVideo(ctx context.Context, req *mcp.CallToolReq
 
 func (s *Server) handleUploadMedia(ctx context.Context, req *mcp.CallToolRequest, input UploadMediaInput) (*mcp.CallToolResult, UploadMediaOutput, error) {
 	if input.Data == "" && input.URL == "" {
-		return nil, UploadMediaOutput{}, fmt.Errorf("either 'data' (base64) or 'url' is required")
+		return nil, UploadMediaOutput{}, fmt.Errorf("one of 'data' (base64) or 'url' is required")
 	}
+
 	if input.MIMEType == "" {
 		return nil, UploadMediaOutput{}, fmt.Errorf("mime_type is required")
 	}
 
 	var data []byte
 	var err error
+	mimeType := input.MIMEType
 
 	if input.Data != "" {
 		// Decode base64 data
@@ -1543,7 +1558,7 @@ func (s *Server) handleUploadMedia(ctx context.Context, req *mcp.CallToolRequest
 		if err != nil {
 			return nil, UploadMediaOutput{}, fmt.Errorf("failed to decode base64 data: %v", err)
 		}
-		log.Printf("Uploading %d bytes of %s data", len(data), input.MIMEType)
+		log.Printf("Uploading %d bytes of %s data", len(data), mimeType)
 	} else {
 		// Download from URL
 		log.Printf("Downloading media from URL: %s", input.URL)
@@ -1570,7 +1585,7 @@ func (s *Server) handleUploadMedia(ctx context.Context, req *mcp.CallToolRequest
 	}
 
 	// Store via storage interface
-	result, err := s.storage.Store(ctx, data, input.MIMEType, prefix)
+	result, err := s.storage.Store(ctx, data, mimeType, prefix)
 	if err != nil {
 		return nil, UploadMediaOutput{}, fmt.Errorf("failed to store media: %v", err)
 	}
@@ -1611,7 +1626,7 @@ func (s *Server) handleUploadMedia(ctx context.Context, req *mcp.CallToolRequest
 		ObjectKey:   result.ObjectKey,
 		DownloadURL: downloadURL,
 		ExpiresAt:   expiresAt,
-		MIMEType:    input.MIMEType,
+		MIMEType:    mimeType,
 		Size:        result.Size,
 		Message:     "Media uploaded successfully",
 		UploadedAt:  timestamp,
