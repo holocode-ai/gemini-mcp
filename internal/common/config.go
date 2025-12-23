@@ -3,6 +3,7 @@ package common
 import (
 	"fmt"
 	"os"
+	"strings"
 )
 
 type Config struct {
@@ -16,6 +17,10 @@ type Config struct {
 	Transport      string
 	OutputDir      string
 	GenmediaBucket string
+
+	// Authentication Configuration
+	ServiceTokens []string // Comma-separated list of valid Bearer tokens
+	AuthEnabled   bool     // Whether authentication is required for HTTP transport
 }
 
 func LoadConfig() *Config {
@@ -27,7 +32,11 @@ func LoadConfig() *Config {
 		Transport:      getEnvOrDefault("TRANSPORT", "stdio"),
 		OutputDir:      getEnvOrDefault("OUTPUT_DIR", "./output"),
 		GenmediaBucket: os.Getenv("GENMEDIA_BUCKET"),
+		ServiceTokens:  parseServiceTokens(os.Getenv("SERVICE_TOKENS")),
 	}
+
+	// Enable auth if tokens are configured
+	config.AuthEnabled = len(config.ServiceTokens) > 0
 
 	// Create output directory if it doesn't exist
 	if config.OutputDir != "" {
@@ -37,6 +46,22 @@ func LoadConfig() *Config {
 	}
 
 	return config
+}
+
+// parseServiceTokens parses a comma-separated list of tokens
+func parseServiceTokens(tokensStr string) []string {
+	if tokensStr == "" {
+		return nil
+	}
+	tokens := strings.Split(tokensStr, ",")
+	var result []string
+	for _, t := range tokens {
+		t = strings.TrimSpace(t)
+		if t != "" {
+			result = append(result, t)
+		}
+	}
+	return result
 }
 
 func getEnvOrDefault(key, defaultValue string) string {

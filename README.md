@@ -15,7 +15,8 @@ A comprehensive Model Context Protocol (MCP) server for Google Gemini AI service
 - **Veo Models**: `veo-3.1-generate-preview` (default - latest with native audio), `veo-3.1-fast-generate-preview`, `veo-3.0-generate-preview`, `veo-3.0-fast-generate-001`
 
 ### **MCP Protocol Features**
-- **Stdio Transport**: Direct integration with MCP clients
+- **Dual Transport Support**: Stdio (default) and HTTP/SSE transports
+- **Bearer Token Authentication**: Secure HTTP access with configurable service tokens
 - **Comprehensive Tool Descriptions**: Detailed parameter documentation and usage examples
 - **File Output Management**: Configurable output directories with metadata
 - **Error Handling**: Robust error handling with informative responses
@@ -132,25 +133,54 @@ cp .env.example .env
 ./gemini-mcp [options]
 
 Options:
-  -transport string    Transport type: stdio (default)
+  -transport string    Transport type: stdio (default), http, or sse
   -version            Show version information
 ```
 
-### Stdio Mode (MCP Integration)
+### Stdio Mode (Default)
 
 Run the server for direct MCP client integration:
 ```bash
 ./gemini-mcp
 ```
 
+### HTTP Mode
+
+Run the server as an HTTP service with optional authentication:
+```bash
+# Basic HTTP mode (no authentication - development only)
+TRANSPORT=http PORT=8080 ./gemini-mcp
+
+# HTTP mode with Bearer token authentication (recommended for production)
+TRANSPORT=http PORT=8080 SERVICE_TOKENS=token1,token2 ./gemini-mcp
+
+# Using Makefile
+make run-http
+```
+
+**HTTP Authentication:**
+When `SERVICE_TOKENS` is configured, all requests must include an `Authorization` header:
+```bash
+curl -X POST http://localhost:8080 \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer token1" \
+  -d '{"jsonrpc":"2.0","method":"tools/list","id":"1"}'
+```
+
 ### Testing MCP Protocol
 
 ```bash
-# Test basic connectivity
+# Test basic connectivity (stdio mode)
 ./test_mcp.sh
 
-# Manual testing
+# Manual testing (stdio mode)
 echo '{"jsonrpc":"2.0","id":"1","method":"tools/list","params":{}}' | ./gemini-mcp
+
+# Test HTTP mode
+curl -X POST http://localhost:8080 \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer your_token" \
+  -d '{"jsonrpc":"2.0","method":"tools/list","id":"1"}'
 ```
 
 ## 🛠️ Available Tools
@@ -263,11 +293,13 @@ General video generation tool supporting both text-to-video and image-to-video c
 | `GOOGLE_PROJECT_ID` | Google Cloud Project ID | - | ❌ Optional |
 | `GOOGLE_LOCATION` | Google Cloud region | `us-central1` | ❌ Optional |
 | `OUTPUT_DIR` | File output directory | `./output` | ❌ Optional |
-| `TRANSPORT` | MCP transport protocol | `stdio` | ❌ Optional |
+| `TRANSPORT` | MCP transport protocol (`stdio`, `http`, `sse`) | `stdio` | ❌ Optional |
+| `PORT` | HTTP server port (when TRANSPORT=http) | `8080` | ❌ Optional |
+| `SERVICE_TOKENS` | Comma-separated Bearer tokens for HTTP auth | - | ❌ Optional |
 
 ## 🔌 MCP Client Integration
 
-### Claude Desktop Configuration
+### Claude Desktop Configuration (Stdio Mode)
 ```json
 {
   "mcpServers": {
@@ -289,6 +321,27 @@ General video generation tool supporting both text-to-video and image-to-video c
       "command": "/path/to/gemini-mcp",
       "env": {
         "GOOGLE_API_KEY": "your_api_key_here"
+      }
+    }
+  }
+}
+```
+
+### Claude Desktop Configuration (HTTP Mode)
+
+First, start the server in HTTP mode:
+```bash
+GOOGLE_API_KEY=your_api_key TRANSPORT=http PORT=8080 SERVICE_TOKENS=mytoken ./gemini-mcp
+```
+
+Then configure Claude Desktop to connect via HTTP:
+```json
+{
+  "mcpServers": {
+    "gemini": {
+      "url": "http://localhost:8080",
+      "headers": {
+        "Authorization": "Bearer mytoken"
       }
     }
   }
@@ -318,10 +371,34 @@ go mod tidy
 go build -o gemini-mcp main.go
 ```
 
+### Multi-Platform Builds
+```bash
+# Build for current platform
+make build
+
+# Build for specific platforms
+make build-darwin-arm64   # macOS Apple Silicon
+make build-darwin-amd64   # macOS Intel
+make build-linux-amd64    # Linux x86_64
+make build-linux-arm64    # Linux ARM64
+
+# Build all platforms
+make build-all
+
+# Build release versions (with version suffix)
+make release
+```
+
 ### Testing
 ```bash
 make test
 ./test_mcp.sh
+```
+
+### Running
+```bash
+make run        # Run in stdio mode
+make run-http   # Run in HTTP mode (port 8080)
 ```
 
 ### Code Quality
@@ -333,12 +410,14 @@ make clean  # Clean artifacts
 ## 📝 Implementation Notes
 
 - **Gemini Integration**: Uses `google.golang.org/genai` with Gemini API backend
-- **Protocol Compliance**: Implements MCP 2024-11-05 specification
-- **Image Generation**: Full implementation with Gemini 3.0 Pro models
+- **Protocol Compliance**: Implements MCP 2024-11-05 specification with Streamable HTTP transport (2025-03-26)
+- **Transport Support**: Stdio (default) and HTTP/SSE with Bearer token authentication
+- **Image Generation**: Full implementation with Gemini 3.0 Pro models, returns ImageContent for MCP clients
 - **Video Generation**: Complete Veo 3.1 integration with native audio, operation polling, and proper file downloads
 - **File Management**: Generated content saved with metadata and timestamps
 - **Error Handling**: Comprehensive error responses with helpful messages
 - **Multi-modal Support**: Supports text-to-image, image-to-image, text-to-video, and image-to-video workflows
+- **Authentication**: Configurable Bearer token authentication for HTTP transport with multiple token support
 
 ## 🤝 Contributing
 

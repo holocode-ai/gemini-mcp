@@ -6,12 +6,14 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
 
 	"gemini-mcp/internal/common"
+	"gemini-mcp/internal/middleware"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"google.golang.org/genai"
@@ -208,9 +210,64 @@ func main() {
 
 	log.Printf("Starting %s v%s (Transport: %s)", serviceName, version, config.Transport)
 
-	// Run server with stdio transport
-	if err := mcpServer.Run(ctx, &mcp.StdioTransport{}); err != nil {
-		log.Fatalf("Server error: %v", err)
+	// Select transport based on configuration
+	switch config.Transport {
+	case "http", "sse":
+		// HTTP/SSE Transport using StreamableHTTPHandler
+		if err := runHTTPServer(ctx, mcpServer, config); err != nil {
+			log.Fatalf("HTTP server error: %v", err)
+		}
+	case "stdio":
+		fallthrough
+	default:
+		// stdio Transport (default)
+		if err := mcpServer.Run(ctx, &mcp.StdioTransport{}); err != nil {
+			log.Fatalf("Server error: %v", err)
+		}
+	}
+}
+
+// runHTTPServer starts the MCP server with HTTP transport
+func runHTTPServer(ctx context.Context, mcpServer *mcp.Server, config *common.Config) error {
+	// Create StreamableHTTPHandler
+	handler := mcp.NewStreamableHTTPHandler(func(req *http.Request) *mcp.Server {
+		return mcpServer
+	}, nil)
+
+	// Wrap with authentication middleware if tokens are configured
+	var httpHandler http.Handler = handler
+	if config.AuthEnabled && len(config.ServiceTokens) > 0 {
+		log.Printf("Authentication enabled with %d configured tokens", len(config.ServiceTokens))
+		httpHandler = middleware.AuthMiddleware(config.ServiceTokens, handler)
+	} else {
+		log.Printf("WARNING: Authentication disabled - server is publicly accessible")
+	}
+
+	// Create HTTP server with graceful shutdown support
+	addr := ":" + config.Port
+	server := &http.Server{
+		Addr:    addr,
+		Handler: httpHandler,
+	}
+
+	// Start server in goroutine
+	errChan := make(chan error, 1)
+	go func() {
+		log.Printf("HTTP server listening on %s", addr)
+		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			errChan <- err
+		}
+	}()
+
+	// Wait for context cancellation or error
+	select {
+	case <-ctx.Done():
+		log.Println("Shutting down HTTP server...")
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		return server.Shutdown(shutdownCtx)
+	case err := <-errChan:
+		return err
 	}
 }
 
@@ -307,6 +364,7 @@ func (s *Server) handleGeminiImageGeneration(ctx context.Context, req *mcp.CallT
 	}
 
 	var savedFiles []string
+	var imageContents []mcp.Content // Collect image data for MCP response
 	timestamp := time.Now().Format("20060102_150405")
 	var imagesCreated int
 
@@ -358,6 +416,18 @@ func (s *Server) handleGeminiImageGeneration(ctx context.Context, req *mcp.CallT
 			for i, part := range candidate.Content.Parts {
 				if part.InlineData != nil && len(part.InlineData.Data) > 0 {
 					imagesCreated++
+
+					// Add image to MCP response content
+					mimeType := part.InlineData.MIMEType
+					if mimeType == "" {
+						mimeType = "image/png"
+					}
+					imageContents = append(imageContents, &mcp.ImageContent{
+						Data:     part.InlineData.Data,
+						MIMEType: mimeType,
+					})
+
+					// Also save to file if output directory specified
 					if outputDir != "" {
 						filename := fmt.Sprintf("gemini_generated_%s_%s_%d.png", style, timestamp, i)
 						outputPath := filepath.Join(outputDir, filename)
@@ -431,11 +501,18 @@ func (s *Server) handleGeminiImageGeneration(ctx context.Context, req *mcp.CallT
 
 		imagesCreated = len(response.GeneratedImages)
 
-		// Save generated images to local directory
-		if outputDir != "" {
-			if err := os.MkdirAll(outputDir, 0755); err == nil {
-				for i, genImage := range response.GeneratedImages {
-					if genImage.Image != nil && len(genImage.Image.ImageBytes) > 0 {
+		// Process generated images
+		for i, genImage := range response.GeneratedImages {
+			if genImage.Image != nil && len(genImage.Image.ImageBytes) > 0 {
+				// Add image to MCP response content
+				imageContents = append(imageContents, &mcp.ImageContent{
+					Data:     genImage.Image.ImageBytes,
+					MIMEType: "image/png",
+				})
+
+				// Also save to file if output directory specified
+				if outputDir != "" {
+					if err := os.MkdirAll(outputDir, 0755); err == nil {
 						filename := fmt.Sprintf("imagen_generated_%s_%s_%d.png", style, timestamp, i)
 						outputPath := filepath.Join(outputDir, filename)
 
@@ -445,10 +522,10 @@ func (s *Server) handleGeminiImageGeneration(ctx context.Context, req *mcp.CallT
 						} else {
 							log.Printf("Error saving image: %v", err)
 						}
+					} else {
+						log.Printf("Error creating output directory: %v", err)
 					}
 				}
-			} else {
-				log.Printf("Error creating output directory: %v", err)
 			}
 		}
 	}
@@ -494,7 +571,15 @@ func (s *Server) handleGeminiImageGeneration(ctx context.Context, req *mcp.CallT
 		}
 	}
 
-	return nil, GeminiImageGenerationOutput{
+	// Build result with image content for MCP clients
+	var result *mcp.CallToolResult
+	if len(imageContents) > 0 {
+		result = &mcp.CallToolResult{
+			Content: imageContents,
+		}
+	}
+
+	return result, GeminiImageGenerationOutput{
 		Description:   resultText,
 		Model:         model,
 		Style:         style,
@@ -590,8 +675,15 @@ func (s *Server) handleGeminiImageEdit(ctx context.Context, req *mcp.CallToolReq
 
 	// Process response
 	var savedFiles []string
+	var imageContents []mcp.Content
 	timestamp := time.Now().Format("20060102_150405")
 	var editedImagePath string
+
+	// Determine output directory
+	outputDir := input.OutputDirectory
+	if outputDir == "" {
+		outputDir = s.config.OutputDir
+	}
 
 	for _, candidate := range response.Candidates {
 		if candidate.Content == nil {
@@ -600,12 +692,17 @@ func (s *Server) handleGeminiImageEdit(ctx context.Context, req *mcp.CallToolReq
 
 		for i, part := range candidate.Content.Parts {
 			if part.InlineData != nil && len(part.InlineData.Data) > 0 {
-				// Save edited image
-				outputDir := input.OutputDirectory
-				if outputDir == "" {
-					outputDir = s.config.OutputDir
+				// Add image to MCP response content
+				mimeType := part.InlineData.MIMEType
+				if mimeType == "" {
+					mimeType = "image/png"
 				}
+				imageContents = append(imageContents, &mcp.ImageContent{
+					Data:     part.InlineData.Data,
+					MIMEType: mimeType,
+				})
 
+				// Also save to file if output directory specified
 				if outputDir != "" {
 					if err := os.MkdirAll(outputDir, 0755); err == nil {
 						filename := fmt.Sprintf("gemini_edited_%s_%s_%d.png", editType, timestamp, i)
@@ -632,7 +729,15 @@ func (s *Server) handleGeminiImageEdit(ctx context.Context, req *mcp.CallToolReq
 		"mask_area":      input.MaskArea,
 	}
 
-	return nil, GeminiImageEditOutput{
+	// Build result with image content for MCP clients
+	var result *mcp.CallToolResult
+	if len(imageContents) > 0 {
+		result = &mcp.CallToolResult{
+			Content: imageContents,
+		}
+	}
+
+	return result, GeminiImageEditOutput{
 		OriginalImage: input.InputImagePath,
 		EditedImage:   editedImagePath,
 		EditType:      editType,
@@ -723,8 +828,15 @@ func (s *Server) handleGeminiMultiImage(ctx context.Context, req *mcp.CallToolRe
 
 	// Process response
 	var savedFiles []string
+	var imageContents []mcp.Content
 	timestamp := time.Now().Format("20060102_150405")
 	var combinedImagePath string
+
+	// Determine output directory
+	outputDir := input.OutputDirectory
+	if outputDir == "" {
+		outputDir = s.config.OutputDir
+	}
 
 	for _, candidate := range response.Candidates {
 		if candidate.Content == nil {
@@ -733,12 +845,17 @@ func (s *Server) handleGeminiMultiImage(ctx context.Context, req *mcp.CallToolRe
 
 		for i, part := range candidate.Content.Parts {
 			if part.InlineData != nil && len(part.InlineData.Data) > 0 {
-				// Save combined image
-				outputDir := input.OutputDirectory
-				if outputDir == "" {
-					outputDir = s.config.OutputDir
+				// Add image to MCP response content
+				mimeType := part.InlineData.MIMEType
+				if mimeType == "" {
+					mimeType = "image/png"
 				}
+				imageContents = append(imageContents, &mcp.ImageContent{
+					Data:     part.InlineData.Data,
+					MIMEType: mimeType,
+				})
 
+				// Also save to file if output directory specified
 				if outputDir != "" {
 					if err := os.MkdirAll(outputDir, 0755); err == nil {
 						filename := fmt.Sprintf("gemini_combined_%s_%s_%d.png", blendMode, timestamp, i)
@@ -764,7 +881,15 @@ func (s *Server) handleGeminiMultiImage(ctx context.Context, req *mcp.CallToolRe
 		"images_count":   fmt.Sprintf("%d", len(input.InputImagePaths)),
 	}
 
-	return nil, GeminiMultiImageOutput{
+	// Build result with image content for MCP clients
+	var result *mcp.CallToolResult
+	if len(imageContents) > 0 {
+		result = &mcp.CallToolResult{
+			Content: imageContents,
+		}
+	}
+
+	return result, GeminiMultiImageOutput{
 		InputImages:     input.InputImagePaths,
 		CombinedImage:   combinedImagePath,
 		BlendMode:       blendMode,
@@ -854,17 +979,20 @@ func (s *Server) handleVeoGeneration(ctx context.Context, req *mcp.CallToolReque
 					filename := fmt.Sprintf("veo_video_%s.mp4", timestamp)
 					outputPath := filepath.Join(input.OutputDirectory, filename)
 
-					// Download the video file following official documentation pattern
-					s.client.Files.Download(ctx, video.Video, nil)
-
-					// Save the video bytes to file
-					err = os.WriteFile(outputPath, video.Video.VideoBytes, 0644)
+					// Download the video file using proper URI
+					downloadURI := genai.NewDownloadURIFromVideo(video.Video)
+					videoData, err := s.client.Files.Download(ctx, downloadURI, nil)
 					if err != nil {
-						log.Printf("Error saving video file: %v", err)
+						log.Printf("Error downloading video: %v", err)
 					} else {
-						savedFiles = append(savedFiles, outputPath)
-						videoURL = outputPath
-						log.Printf("Video saved to: %s", outputPath)
+						// Save the video bytes to file
+						if err := os.WriteFile(outputPath, videoData, 0644); err != nil {
+							log.Printf("Error saving video file: %v", err)
+						} else {
+							savedFiles = append(savedFiles, outputPath)
+							videoURL = outputPath
+							log.Printf("Video saved to: %s", outputPath)
+						}
 					}
 				}
 			}
@@ -998,17 +1126,20 @@ func (s *Server) handleVeoTextToVideo(ctx context.Context, req *mcp.CallToolRequ
 					filename := fmt.Sprintf("veo_text_to_video_%s.mp4", timestamp)
 					outputPath := filepath.Join(input.OutputDirectory, filename)
 
-					// Download the video file following official documentation pattern
-					s.client.Files.Download(ctx, video.Video, nil)
-
-					// Save the video bytes to file
-					err = os.WriteFile(outputPath, video.Video.VideoBytes, 0644)
+					// Download the video file using proper URI
+					downloadURI := genai.NewDownloadURIFromVideo(video.Video)
+					videoData, err := s.client.Files.Download(ctx, downloadURI, nil)
 					if err != nil {
-						log.Printf("Error saving video file: %v", err)
+						log.Printf("Error downloading video: %v", err)
 					} else {
-						savedFiles = append(savedFiles, outputPath)
-						videoURL = outputPath
-						log.Printf("Text-to-video saved to: %s", outputPath)
+						// Save the video bytes to file
+						if err := os.WriteFile(outputPath, videoData, 0644); err != nil {
+							log.Printf("Error saving video file: %v", err)
+						} else {
+							savedFiles = append(savedFiles, outputPath)
+							videoURL = outputPath
+							log.Printf("Text-to-video saved to: %s", outputPath)
+						}
 					}
 				}
 			}
@@ -1169,17 +1300,20 @@ func (s *Server) handleVeoImageToVideo(ctx context.Context, req *mcp.CallToolReq
 					filename := fmt.Sprintf("veo_image_to_video_%s.mp4", timestamp)
 					outputPath := filepath.Join(input.OutputDirectory, filename)
 
-					// Download the video file following official documentation pattern
-					s.client.Files.Download(ctx, video.Video, nil)
-
-					// Save the video bytes to file
-					err = os.WriteFile(outputPath, video.Video.VideoBytes, 0644)
+					// Download the video file using proper URI
+					downloadURI := genai.NewDownloadURIFromVideo(video.Video)
+					videoData, err := s.client.Files.Download(ctx, downloadURI, nil)
 					if err != nil {
-						log.Printf("Error saving video file: %v", err)
+						log.Printf("Error downloading video: %v", err)
 					} else {
-						savedFiles = append(savedFiles, outputPath)
-						videoURL = outputPath
-						log.Printf("Image-to-video saved to: %s", outputPath)
+						// Save the video bytes to file
+						if err := os.WriteFile(outputPath, videoData, 0644); err != nil {
+							log.Printf("Error saving video file: %v", err)
+						} else {
+							savedFiles = append(savedFiles, outputPath)
+							videoURL = outputPath
+							log.Printf("Image-to-video saved to: %s", outputPath)
+						}
 					}
 				}
 			}

@@ -5,7 +5,7 @@ FROM golang:1.23-alpine AS builder
 RUN apk add --no-cache git ca-certificates tzdata
 
 # Create appuser for security
-RUN adduser -D -g '' appuser
+RUN adduser -D -g '' -u 10001 appuser
 
 # Set working directory
 WORKDIR /build
@@ -24,39 +24,32 @@ COPY . .
 ARG VERSION=dev
 ARG BUILD_TIME
 ARG GIT_COMMIT
+ARG TARGETARCH=amd64
 
-# Build the application
-RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
+# Build the application for target architecture
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH} go build \
     -ldflags="-w -s -X main.version=${VERSION} -X 'main.buildTime=${BUILD_TIME}' -X main.gitCommit=${GIT_COMMIT}" \
     -o gemini-mcp main.go
 
-# Final stage
-FROM scratch
+# Final stage - use distroless for smaller image with basic utilities
+FROM gcr.io/distroless/static:nonroot
 
-# Import from builder
+# Copy CA certificates for HTTPS
 COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
-COPY --from=builder /usr/share/zoneinfo /usr/share/zoneinfo
-COPY --from=builder /etc/passwd /etc/passwd
 
 # Copy binary
 COPY --from=builder /build/gemini-mcp /app/gemini-mcp
 
-# Use appuser
-USER appuser
-
 # Set working directory
 WORKDIR /app
-
-# Create output directory
-RUN mkdir -p /app/output
 
 # Environment variables
 ENV OUTPUT_DIR=/app/output
 ENV TRANSPORT=stdio
+ENV PORT=8080
 
-# Expose health check
-HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
-    CMD ./gemini-mcp -version || exit 1
+# Expose HTTP port (for HTTP/SSE transport mode)
+EXPOSE 8080
 
 # Default command
-ENTRYPOINT ["./gemini-mcp"]
+ENTRYPOINT ["/app/gemini-mcp"]

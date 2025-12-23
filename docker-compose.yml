@@ -1,0 +1,40 @@
+services:
+  gemini-mcp:
+    build:
+      context: .
+      args:
+        VERSION: ${VERSION:-dev}
+        BUILD_TIME: ${BUILD_TIME:-unknown}
+        GIT_COMMIT: ${GIT_COMMIT:-unknown}
+    image: gemini-mcp:latest
+    container_name: gemini-mcp
+    restart: unless-stopped
+
+    # Environment variables
+    environment:
+      - GOOGLE_API_KEY=${GOOGLE_API_KEY}
+      - GOOGLE_PROJECT_ID=${GOOGLE_PROJECT_ID:-}
+      - GOOGLE_LOCATION=${GOOGLE_LOCATION:-us-central1}
+      - TRANSPORT=${TRANSPORT:-http}
+      - PORT=${PORT:-8080}
+      - OUTPUT_DIR=/app/output
+      - SERVICE_TOKENS=${SERVICE_TOKENS:-}
+
+    # Port mapping for HTTP mode
+    ports:
+      - "${PORT:-8080}:8080"
+
+    # Volume mapping for output files
+    volumes:
+      - ./output:/app/output
+
+    # Health check
+    healthcheck:
+      test: ["CMD", "/app/gemini-mcp", "-version"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+volumes:
+  output:
