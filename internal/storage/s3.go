@@ -37,11 +37,35 @@ type S3Config struct {
 	CleanupInterval time.Duration
 }
 
+// parseEndpoint extracts host:port from an endpoint that may include a protocol
+func parseEndpoint(endpoint string, defaultUseSSL bool) (host string, useSSL bool) {
+	useSSL = defaultUseSSL
+
+	// Check if endpoint has a scheme
+	if parsed, err := url.Parse(endpoint); err == nil && parsed.Scheme != "" {
+		// Has scheme (http:// or https://)
+		useSSL = parsed.Scheme == "https"
+		host = parsed.Host
+		if host == "" {
+			// Fallback if parsing didn't work as expected
+			host = endpoint
+		}
+	} else {
+		// No scheme, use as-is
+		host = endpoint
+	}
+
+	return host, useSSL
+}
+
 // NewS3Storage creates a new S3 storage instance
 func NewS3Storage(cfg S3Config) (*S3Storage, error) {
-	client, err := minio.New(cfg.Endpoint, &minio.Options{
+	// Parse endpoint to extract host:port and detect SSL from scheme
+	endpoint, useSSL := parseEndpoint(cfg.Endpoint, cfg.UseSSL)
+
+	client, err := minio.New(endpoint, &minio.Options{
 		Creds:  credentials.NewStaticV4(cfg.AccessKeyID, cfg.SecretAccessKey, ""),
-		Secure: cfg.UseSSL,
+		Secure: useSSL,
 		Region: cfg.Region,
 	})
 	if err != nil {
