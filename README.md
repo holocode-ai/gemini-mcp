@@ -339,6 +339,7 @@ Then configure Claude Desktop to connect via HTTP:
 {
   "mcpServers": {
     "gemini": {
+      "type": "http",
       "url": "http://localhost:8080",
       "headers": {
         "Authorization": "Bearer mytoken"

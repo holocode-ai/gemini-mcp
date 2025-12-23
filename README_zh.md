@@ -15,7 +15,8 @@
 - **Veo 模型**：`veo-3.1-generate-preview`（默认 - 最新版本，支持原生音频）、`veo-3.1-fast-generate-preview`、`veo-3.0-generate-preview`、`veo-3.0-fast-generate-001`
 
 ### **MCP 协议功能**
-- **Stdio 传输**：直接与 MCP 客户端集成
+- **双传输支持**：Stdio（默认）和 HTTP/SSE 传输
+- **Bearer Token 认证**：可配置服务令牌的安全 HTTP 访问
 - **全面的工具描述**：详细的参数文档和使用示例
 - **文件输出管理**：可配置的输出目录和元数据
 - **错误处理**：强大的错误处理机制，提供有用的响应信息
@@ -132,25 +133,54 @@ cp .env.example .env
 ./gemini-mcp [选项]
 
 选项:
-  -transport string    传输类型：stdio（默认）
+  -transport string    传输类型：stdio（默认）、http 或 sse
   -version            显示版本信息
 ```
 
-### Stdio 模式（MCP 集成）
+### Stdio 模式（默认）
 
 运行服务器以直接与 MCP 客户端集成：
 ```bash
 ./gemini-mcp
 ```
 
+### HTTP 模式
+
+作为 HTTP 服务运行，支持可选的身份认证：
+```bash
+# 基本 HTTP 模式（无认证 - 仅用于开发）
+TRANSPORT=http PORT=8080 ./gemini-mcp
+
+# 带 Bearer Token 认证的 HTTP 模式（生产环境推荐）
+TRANSPORT=http PORT=8080 SERVICE_TOKENS=token1,token2 ./gemini-mcp
+
+# 使用 Makefile
+make run-http
+```
+
+**HTTP 认证：**
+配置 `SERVICE_TOKENS` 后，所有请求必须包含 `Authorization` 头：
+```bash
+curl -X POST http://localhost:8080 \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer token1" \
+  -d '{"jsonrpc":"2.0","method":"tools/list","id":"1"}'
+```
+
 ### 测试 MCP 协议
 
 ```bash
-# 测试基本连接
+# 测试基本连接（stdio 模式）
 ./test_mcp.sh
 
-# 手动测试
+# 手动测试（stdio 模式）
 echo '{"jsonrpc":"2.0","id":"1","method":"tools/list","params":{}}' | ./gemini-mcp
+
+# 测试 HTTP 模式
+curl -X POST http://localhost:8080 \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer your_token" \
+  -d '{"jsonrpc":"2.0","method":"tools/list","id":"1"}'
 ```
 
 ## 🛠️ 可用工具
@@ -263,11 +293,13 @@ echo '{"jsonrpc":"2.0","id":"1","method":"tools/list","params":{}}' | ./gemini-m
 | `GOOGLE_PROJECT_ID` | Google Cloud 项目 ID | - | ❌ 可选 |
 | `GOOGLE_LOCATION` | Google Cloud 区域 | `us-central1` | ❌ 可选 |
 | `OUTPUT_DIR` | 文件输出目录 | `./output` | ❌ 可选 |
-| `TRANSPORT` | MCP 传输协议 | `stdio` | ❌ 可选 |
+| `TRANSPORT` | MCP 传输协议（`stdio`、`http`、`sse`） | `stdio` | ❌ 可选 |
+| `PORT` | HTTP 服务器端口（当 TRANSPORT=http 时） | `8080` | ❌ 可选 |
+| `SERVICE_TOKENS` | 逗号分隔的 HTTP 认证 Bearer Token | - | ❌ 可选 |
 
 ## 🔌 MCP 客户端集成
 
-### Claude Desktop 配置
+### Claude Desktop 配置（Stdio 模式）
 ```json
 {
   "mcpServers": {
@@ -289,6 +321,28 @@ echo '{"jsonrpc":"2.0","id":"1","method":"tools/list","params":{}}' | ./gemini-m
       "command": "/path/to/gemini-mcp",
       "env": {
         "GOOGLE_API_KEY": "your_api_key_here"
+      }
+    }
+  }
+}
+```
+
+### Claude Desktop 配置（HTTP 模式）
+
+首先，以 HTTP 模式启动服务器：
+```bash
+GOOGLE_API_KEY=your_api_key TRANSPORT=http PORT=8080 SERVICE_TOKENS=mytoken ./gemini-mcp
+```
+
+然后配置 Claude Desktop 通过 HTTP 连接：
+```json
+{
+  "mcpServers": {
+    "gemini": {
+      "type": "http",
+      "url": "http://localhost:8080",
+      "headers": {
+        "Authorization": "Bearer mytoken"
       }
     }
   }
@@ -318,10 +372,34 @@ go mod tidy
 go build -o gemini-mcp main.go
 ```
 
+### 多平台构建
+```bash
+# 为当前平台构建
+make build
+
+# 为特定平台构建
+make build-darwin-arm64   # macOS Apple Silicon
+make build-darwin-amd64   # macOS Intel
+make build-linux-amd64    # Linux x86_64
+make build-linux-arm64    # Linux ARM64
+
+# 构建所有平台
+make build-all
+
+# 构建发布版本（带版本后缀）
+make release
+```
+
 ### 测试
 ```bash
 make test
 ./test_mcp.sh
+```
+
+### 运行
+```bash
+make run        # 以 stdio 模式运行
+make run-http   # 以 HTTP 模式运行（端口 8080）
 ```
 
 ### 代码质量
@@ -333,12 +411,14 @@ make clean  # 清理构建产物
 ## 📝 实现说明
 
 - **Gemini 集成**：使用 `google.golang.org/genai` 与 Gemini API 后端集成
-- **协议合规性**：实现 MCP 2024-11-05 规范
-- **图像生成**：完全实现 Gemini 3.0 Pro 模型
+- **协议合规性**：实现 MCP 2024-11-05 规范，支持 Streamable HTTP 传输（2025-03-26）
+- **传输支持**：Stdio（默认）和 HTTP/SSE，支持 Bearer Token 认证
+- **图像生成**：完全实现 Gemini 3.0 Pro 模型，为 MCP 客户端返回 ImageContent
 - **视频生成**：完整的 Veo 3.1 集成，支持原生音频、操作轮询和正确的文件下载
 - **文件管理**：生成的内容保存时包含元数据和时间戳
 - **错误处理**：全面的错误响应机制，提供有用的错误信息
 - **多模态支持**：支持文本生成图像、图像生成图像、文本生成视频和图像生成视频工作流程
+- **认证**：可配置的 HTTP 传输 Bearer Token 认证，支持多令牌
 
 ## 🤝 贡献
 
