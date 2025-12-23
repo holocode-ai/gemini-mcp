@@ -36,6 +36,11 @@ type Storage interface {
 	// - prefix: prefix for the filename (e.g., "gemini_image", "veo_video")
 	Store(ctx context.Context, data []byte, mimeType string, prefix string) (*StorageResult, error)
 
+	// Retrieve downloads content from storage and returns the local temp file path
+	// For S3: downloads to /tmp and returns the temp file path
+	// For local storage: returns the original file path if it exists
+	Retrieve(ctx context.Context, objectKey string) (localPath string, cleanup func(), err error)
+
 	// Delete removes an object by its key
 	Delete(ctx context.Context, objectKey string) error
 

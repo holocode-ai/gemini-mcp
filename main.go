@@ -2,8 +2,10 @@ package main
 
 import (
 	"context"
+	"encoding/base64"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"os"
@@ -73,7 +75,7 @@ type GeminiImageGenerationOutput struct {
 }
 
 type GeminiImageEditInput struct {
-	InputImagePath  string `json:"input_image_path" jsonschema:"description:Path to the input image file to edit (PNG, JPEG, WebP supported)"`
+	InputImagePath  string `json:"input_image_path" jsonschema:"description:Path to the input image file to edit. Can be a local file path or an S3 object key returned by upload_media (e.g., '2024/12/23/upload_abc123.png'). Supports PNG, JPEG, WebP formats."`
 	EditPrompt      string `json:"edit_prompt" jsonschema:"description:Detailed description of how to edit the image. Be specific about what changes to make."`
 	Model           string `json:"model,omitempty" jsonschema:"description:Gemini model to use for image editing,default:gemini-3-pro-image-preview"`
 	AspectRatio     string `json:"aspect_ratio,omitempty" jsonschema:"description:Preferred aspect ratio for the edited image. Common ratios: '1:1' (square), '16:9' (landscape), '9:16' (portrait), '4:3', '3:4'"`
@@ -97,7 +99,7 @@ type GeminiImageEditOutput struct {
 }
 
 type GeminiMultiImageInput struct {
-	InputImagePaths []string `json:"input_image_paths" jsonschema:"description:Paths to input image files to combine (2-3 images recommended)"`
+	InputImagePaths []string `json:"input_image_paths" jsonschema:"description:Paths to input image files to combine (2-3 images recommended). Can be local file paths or S3 object keys returned by upload_media."`
 	CombinePrompt   string   `json:"combine_prompt" jsonschema:"description:Description of how to combine or blend the images"`
 	Model           string   `json:"model,omitempty" jsonschema:"description:Gemini model to use for multi-image processing,default:gemini-3-pro-image-preview"`
 	AspectRatio     string   `json:"aspect_ratio,omitempty" jsonschema:"description:Preferred aspect ratio for the combined image. Common ratios: '1:1' (square), '16:9' (landscape), '9:16' (portrait), '4:3', '3:4'"`
@@ -133,7 +135,7 @@ type VeoTextToVideoInput struct {
 
 // Image-to-Video Generation
 type VeoImageToVideoInput struct {
-	ImagePath       string `json:"image_path" jsonschema:"description:Path to the initial image file to animate as the starting frame of the video. Supports JPEG, PNG formats."`
+	ImagePath       string `json:"image_path" jsonschema:"description:Path to the initial image file to animate as the starting frame of the video. Can be a local file path or an S3 object key returned by upload_media. Supports JPEG, PNG formats."`
 	Prompt          string `json:"prompt" jsonschema:"description:Text prompt describing how the image should be animated and what should happen in the video (max 1024 tokens)."`
 	NegativePrompt  string `json:"negative_prompt,omitempty" jsonschema:"description:Description of what should NOT happen in the animation or appear in the video."`
 	AspectRatio     string `json:"aspect_ratio,omitempty" jsonschema:"description:Video width-to-height ratio,default:16:9,enum:16:9,enum:9:16"`
@@ -141,6 +143,24 @@ type VeoImageToVideoInput struct {
 	Model           string `json:"model,omitempty" jsonschema:"description:Veo model version to use,default:veo-3.1-generate-preview,enum:veo-3.1-generate-preview,enum:veo-3.1-fast-generate-preview,enum:veo-3.0-generate-preview,enum:veo-3.0-fast-generate-001"`
 	Seed            int    `json:"seed,omitempty" jsonschema:"description:Optional seed value for slight reproducibility in generation"`
 	OutputDirectory string `json:"output_directory,omitempty" jsonschema:"description:Local directory path where the MP4 video (4-8 seconds) will be saved. Videos have 2-day retention on server and include SynthID watermark."`
+}
+
+// Upload Media Input/Output types
+type UploadMediaInput struct {
+	Data     string `json:"data" jsonschema:"description:Base64 encoded media data (image or video). Required if url is not provided."`
+	URL      string `json:"url,omitempty" jsonschema:"description:URL of the media to download and upload. Required if data is not provided."`
+	MIMEType string `json:"mime_type" jsonschema:"description:MIME type of the media (e.g., 'image/png', 'image/jpeg', 'video/mp4'). Required."`
+	Prefix   string `json:"prefix,omitempty" jsonschema:"description:Optional prefix for the stored object key (default: 'upload')"`
+}
+
+type UploadMediaOutput struct {
+	ObjectKey    string `json:"object_key"`
+	DownloadURL  string `json:"download_url,omitempty"`
+	ExpiresAt    string `json:"expires_at,omitempty"`
+	MIMEType     string `json:"mime_type"`
+	Size         int64  `json:"size"`
+	Message      string `json:"message"`
+	UploadedAt   string `json:"uploaded_at"`
 }
 
 // Legacy input type for backward compatibility
@@ -304,6 +324,41 @@ func runHTTPServer(ctx context.Context, mcpServer *mcp.Server, config *common.Co
 	}
 }
 
+// resolveInputPath resolves an input path to a local file path
+// If the path looks like an S3 object key (contains / but doesn't start with /),
+// it downloads from S3 to a temp file. Otherwise treats it as a local file path.
+// Returns the local path and a cleanup function (may be nil for local files).
+func (s *Server) resolveInputPath(ctx context.Context, inputPath string) (localPath string, cleanup func(), err error) {
+	// If path starts with /, it's an absolute local path
+	if strings.HasPrefix(inputPath, "/") {
+		// Check if file exists locally
+		if _, err := os.Stat(inputPath); err == nil {
+			return inputPath, nil, nil
+		}
+		return "", nil, fmt.Errorf("local file not found: %s", inputPath)
+	}
+
+	// If storage is remote, try to retrieve from S3
+	if s.storage.IsRemote() {
+		localPath, cleanup, err = s.storage.Retrieve(ctx, inputPath)
+		if err != nil {
+			return "", nil, fmt.Errorf("failed to retrieve from storage: %v", err)
+		}
+		return localPath, cleanup, nil
+	}
+
+	// For local storage, try to retrieve
+	localPath, cleanup, err = s.storage.Retrieve(ctx, inputPath)
+	if err != nil {
+		// If not found in storage, treat as relative path and check if exists
+		if _, statErr := os.Stat(inputPath); statErr == nil {
+			return inputPath, nil, nil
+		}
+		return "", nil, fmt.Errorf("file not found: %s", inputPath)
+	}
+	return localPath, cleanup, nil
+}
+
 func (s *Server) registerTools(server *mcp.Server) {
 	// Register gemini_image_generation tool
 	mcp.AddTool(server, &mcp.Tool{
@@ -340,6 +395,12 @@ func (s *Server) registerTools(server *mcp.Server) {
 		Name:        "veo_generate_video",
 		Description: "Generate high-quality 8-second videos using Google's Veo 3.0 video generation models. Supports both text-to-video and image-to-video creation with advanced scene composition, camera movements, and realistic physics. Features include 16:9 and 9:16 aspect ratios, 720p/1080p resolution, negative prompts for content exclusion, and automatic operation polling with video URL retrieval.",
 	}, s.handleVeoGeneration)
+
+	// Register upload_media tool
+	mcp.AddTool(server, &mcp.Tool{
+		Name:        "upload_media",
+		Description: "Upload images or videos to storage for use with edit operations. Accepts base64 encoded data or a URL. Returns an object_key that can be used with gemini_image_edit, gemini_multi_image, and veo_image_to_video tools. Files are stored with the same TTL as generated content.",
+	}, s.handleUploadMedia)
 
 }
 
@@ -639,8 +700,17 @@ func (s *Server) handleGeminiImageEdit(ctx context.Context, req *mcp.CallToolReq
 
 	log.Printf("Editing image %s with model %s: %s", input.InputImagePath, model, input.EditPrompt)
 
+	// Resolve input image path (may download from S3)
+	localImagePath, cleanup, err := s.resolveInputPath(ctx, input.InputImagePath)
+	if err != nil {
+		return nil, GeminiImageEditOutput{}, fmt.Errorf("failed to resolve input image: %v", err)
+	}
+	if cleanup != nil {
+		defer cleanup()
+	}
+
 	// Read input image
-	imgData, err := os.ReadFile(input.InputImagePath)
+	imgData, err := os.ReadFile(localImagePath)
 	if err != nil {
 		return nil, GeminiImageEditOutput{}, fmt.Errorf("failed to read input image: %v", err)
 	}
@@ -849,9 +919,28 @@ func (s *Server) handleGeminiMultiImage(ctx context.Context, req *mcp.CallToolRe
 	promptText := strings.Join(promptParts, ". ")
 	parts := []*genai.Part{genai.NewPartFromText(promptText)}
 
+	// Collect cleanup functions for S3-retrieved images
+	var cleanups []func()
+	defer func() {
+		for _, cleanup := range cleanups {
+			if cleanup != nil {
+				cleanup()
+			}
+		}
+	}()
+
 	// Add all input images to parts
 	for i, imagePath := range input.InputImagePaths {
-		imgData, err := os.ReadFile(imagePath)
+		// Resolve input image path (may download from S3)
+		localImagePath, cleanup, err := s.resolveInputPath(ctx, imagePath)
+		if err != nil {
+			return nil, GeminiMultiImageOutput{}, fmt.Errorf("failed to resolve image %d (%s): %v", i+1, imagePath, err)
+		}
+		if cleanup != nil {
+			cleanups = append(cleanups, cleanup)
+		}
+
+		imgData, err := os.ReadFile(localImagePath)
 		if err != nil {
 			return nil, GeminiMultiImageOutput{}, fmt.Errorf("failed to read image %d (%s): %v", i+1, imagePath, err)
 		}
@@ -1274,9 +1363,13 @@ func (s *Server) handleVeoImageToVideo(ctx context.Context, req *mcp.CallToolReq
 		return nil, VeoGenerationOutput{}, fmt.Errorf("prompt is required")
 	}
 
-	// Check if image file exists
-	if _, err := os.Stat(input.ImagePath); os.IsNotExist(err) {
-		return nil, VeoGenerationOutput{}, fmt.Errorf("image file not found: %s", input.ImagePath)
+	// Resolve input image path (may download from S3)
+	localImagePath, cleanup, err := s.resolveInputPath(ctx, input.ImagePath)
+	if err != nil {
+		return nil, VeoGenerationOutput{}, fmt.Errorf("failed to resolve input image: %v", err)
+	}
+	if cleanup != nil {
+		defer cleanup()
 	}
 
 	// Set defaults
@@ -1301,7 +1394,7 @@ func (s *Server) handleVeoImageToVideo(ctx context.Context, req *mcp.CallToolReq
 	timestamp := time.Now().Format("20060102_150405")
 
 	// Read the input image file
-	imageData, err := os.ReadFile(input.ImagePath)
+	imageData, err := os.ReadFile(localImagePath)
 	if err != nil {
 		return nil, VeoGenerationOutput{}, fmt.Errorf("failed to read input image: %v", err)
 	}
@@ -1430,5 +1523,97 @@ func (s *Server) handleVeoImageToVideo(ctx context.Context, req *mcp.CallToolReq
 		Metadata:        metadata,
 		GeneratedAt:     timestamp,
 		EstimatedLength: "8 seconds",
+	}, nil
+}
+
+func (s *Server) handleUploadMedia(ctx context.Context, req *mcp.CallToolRequest, input UploadMediaInput) (*mcp.CallToolResult, UploadMediaOutput, error) {
+	if input.Data == "" && input.URL == "" {
+		return nil, UploadMediaOutput{}, fmt.Errorf("either 'data' (base64) or 'url' is required")
+	}
+	if input.MIMEType == "" {
+		return nil, UploadMediaOutput{}, fmt.Errorf("mime_type is required")
+	}
+
+	var data []byte
+	var err error
+
+	if input.Data != "" {
+		// Decode base64 data
+		data, err = base64.StdEncoding.DecodeString(input.Data)
+		if err != nil {
+			return nil, UploadMediaOutput{}, fmt.Errorf("failed to decode base64 data: %v", err)
+		}
+		log.Printf("Uploading %d bytes of %s data", len(data), input.MIMEType)
+	} else {
+		// Download from URL
+		log.Printf("Downloading media from URL: %s", input.URL)
+		resp, err := http.Get(input.URL)
+		if err != nil {
+			return nil, UploadMediaOutput{}, fmt.Errorf("failed to download from URL: %v", err)
+		}
+		defer resp.Body.Close()
+
+		if resp.StatusCode != http.StatusOK {
+			return nil, UploadMediaOutput{}, fmt.Errorf("failed to download from URL: status %d", resp.StatusCode)
+		}
+
+		data, err = io.ReadAll(resp.Body)
+		if err != nil {
+			return nil, UploadMediaOutput{}, fmt.Errorf("failed to read response body: %v", err)
+		}
+		log.Printf("Downloaded %d bytes from URL", len(data))
+	}
+
+	prefix := input.Prefix
+	if prefix == "" {
+		prefix = "upload"
+	}
+
+	// Store via storage interface
+	result, err := s.storage.Store(ctx, data, input.MIMEType, prefix)
+	if err != nil {
+		return nil, UploadMediaOutput{}, fmt.Errorf("failed to store media: %v", err)
+	}
+
+	log.Printf("Stored uploaded media: %s", result.ObjectKey)
+
+	timestamp := time.Now().Format("20060102_150405")
+	var expiresAt string
+	var downloadURL string
+
+	if s.storage.IsRemote() {
+		downloadURL = result.Location
+		if result.ExpiresAt != nil {
+			expiresAt = result.ExpiresAt.Format(time.RFC3339)
+		}
+	}
+
+	// Build result message
+	var contentText string
+	if s.storage.IsRemote() {
+		contentText = fmt.Sprintf("Media uploaded successfully.\nObject Key: %s\nDownload URL: %s", result.ObjectKey, downloadURL)
+		if expiresAt != "" {
+			contentText += fmt.Sprintf("\nURL expires at: %s", expiresAt)
+		}
+	} else {
+		contentText = fmt.Sprintf("Media uploaded successfully.\nStored at: %s", result.Location)
+	}
+
+	contentText += fmt.Sprintf("\n\nUse object_key '%s' with gemini_image_edit, gemini_multi_image, or veo_image_to_video tools.", result.ObjectKey)
+
+	return &mcp.CallToolResult{
+		Content: []mcp.Content{
+			&mcp.TextContent{
+				Text: contentText,
+			},
+		},
+	}, UploadMediaOutput{
+		ObjectKey:   result.ObjectKey,
+		DownloadURL: downloadURL,
+		ExpiresAt:   expiresAt,
+		MIMEType:    input.MIMEType,
+		Size:        result.Size,
+		Message:     "Media uploaded successfully",
+		UploadedAt:  timestamp,
 	}, nil
 }

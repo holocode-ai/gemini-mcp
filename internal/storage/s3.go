@@ -6,8 +6,11 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"io"
 	"log"
 	"net/url"
+	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/minio/minio-go/v7"
@@ -148,6 +151,58 @@ func (s *S3Storage) Store(ctx context.Context, data []byte, mimeType string, pre
 		Size:        int64(len(data)),
 		ExpiresAt:   &expiresAt,
 	}, nil
+}
+
+// Retrieve downloads an object from S3 to a local temp file
+// Returns the local file path and a cleanup function to remove the temp file
+func (s *S3Storage) Retrieve(ctx context.Context, objectKey string) (string, func(), error) {
+	// Get object from S3
+	object, err := s.client.GetObject(ctx, s.bucket, objectKey, minio.GetObjectOptions{})
+	if err != nil {
+		return "", nil, fmt.Errorf("failed to get object from S3: %w", err)
+	}
+	defer object.Close()
+
+	// Get object info to determine extension
+	stat, err := object.Stat()
+	if err != nil {
+		return "", nil, fmt.Errorf("failed to stat object: %w", err)
+	}
+
+	// Determine file extension from content type or object key
+	ext := filepath.Ext(objectKey)
+	if ext == "" {
+		ext = ExtensionFromMIME(stat.ContentType)
+	}
+
+	// Create temp file
+	tmpFile, err := os.CreateTemp("/tmp", "gemini-mcp-*"+ext)
+	if err != nil {
+		return "", nil, fmt.Errorf("failed to create temp file: %w", err)
+	}
+	tmpPath := tmpFile.Name()
+
+	// Copy object data to temp file
+	_, err = io.Copy(tmpFile, object)
+	if err != nil {
+		tmpFile.Close()
+		os.Remove(tmpPath)
+		return "", nil, fmt.Errorf("failed to download object: %w", err)
+	}
+	tmpFile.Close()
+
+	log.Printf("Downloaded S3 object %s to temp file %s", objectKey, tmpPath)
+
+	// Return cleanup function
+	cleanup := func() {
+		if err := os.Remove(tmpPath); err != nil {
+			log.Printf("Warning: failed to cleanup temp file %s: %v", tmpPath, err)
+		} else {
+			log.Printf("Cleaned up temp file %s", tmpPath)
+		}
+	}
+
+	return tmpPath, cleanup, nil
 }
 
 // Delete removes an object from S3

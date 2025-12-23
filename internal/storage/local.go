@@ -52,6 +52,24 @@ func (s *LocalStorage) Store(ctx context.Context, data []byte, mimeType string, 
 	}, nil
 }
 
+// Retrieve returns the local file path for a given object key
+// For local storage, no download is needed - just verify the file exists
+func (s *LocalStorage) Retrieve(ctx context.Context, objectKey string) (string, func(), error) {
+	filePath := filepath.Join(s.baseDir, objectKey)
+
+	// Check if file exists
+	if _, err := os.Stat(filePath); os.IsNotExist(err) {
+		return "", nil, fmt.Errorf("file not found: %s", objectKey)
+	} else if err != nil {
+		return "", nil, fmt.Errorf("failed to stat file: %w", err)
+	}
+
+	// No cleanup needed for local storage
+	cleanup := func() {}
+
+	return filePath, cleanup, nil
+}
+
 // Delete removes a file from local storage
 func (s *LocalStorage) Delete(ctx context.Context, objectKey string) error {
 	filePath := filepath.Join(s.baseDir, objectKey)
