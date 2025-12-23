@@ -2,18 +2,19 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"flag"
 	"fmt"
 	"log"
 	"net/http"
 	"os"
-	"path/filepath"
+	"os/signal"
 	"strings"
+	"syscall"
 	"time"
 
 	"gemini-mcp/internal/common"
 	"gemini-mcp/internal/middleware"
+	"gemini-mcp/internal/storage"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"google.golang.org/genai"
@@ -36,8 +37,9 @@ const (
 )
 
 type Server struct {
-	config *common.Config
-	client *genai.Client
+	config  *common.Config
+	client  *genai.Client
+	storage storage.Storage
 }
 
 // Input types for tools
@@ -63,6 +65,8 @@ type GeminiImageGenerationOutput struct {
 	Language      string            `json:"language,omitempty"`
 	Tags          []string          `json:"tags,omitempty"`
 	SavedFiles    []string          `json:"saved_files,omitempty"`
+	DownloadURLs  []string          `json:"download_urls,omitempty"`
+	ExpiresAt     string            `json:"expires_at,omitempty"`
 	Metadata      map[string]string `json:"metadata,omitempty"`
 	GeneratedAt   string            `json:"generated_at"`
 	ImagesCreated int               `json:"images_created"`
@@ -86,6 +90,8 @@ type GeminiImageEditOutput struct {
 	AspectRatio   string            `json:"aspect_ratio,omitempty"`
 	Model         string            `json:"model"`
 	SavedFiles    []string          `json:"saved_files,omitempty"`
+	DownloadURLs  []string          `json:"download_urls,omitempty"`
+	ExpiresAt     string            `json:"expires_at,omitempty"`
 	Metadata      map[string]string `json:"metadata,omitempty"`
 	GeneratedAt   string            `json:"generated_at"`
 }
@@ -107,6 +113,8 @@ type GeminiMultiImageOutput struct {
 	AspectRatio     string            `json:"aspect_ratio,omitempty"`
 	Model           string            `json:"model"`
 	SavedFiles      []string          `json:"saved_files,omitempty"`
+	DownloadURLs    []string          `json:"download_urls,omitempty"`
+	ExpiresAt       string            `json:"expires_at,omitempty"`
 	Metadata        map[string]string `json:"metadata,omitempty"`
 	GeneratedAt     string            `json:"generated_at"`
 	ImagesProcessed int               `json:"images_processed"`
@@ -152,6 +160,8 @@ type VeoGenerationOutput struct {
 	Status          string            `json:"status"`
 	VideoURL        string            `json:"video_url,omitempty"`
 	SavedFiles      []string          `json:"saved_files,omitempty"`
+	DownloadURLs    []string          `json:"download_urls,omitempty"`
+	ExpiresAt       string            `json:"expires_at,omitempty"`
 	Model           string            `json:"model"`
 	AspectRatio     string            `json:"aspect_ratio"`
 	Resolution      string            `json:"resolution"`
@@ -183,7 +193,9 @@ func main() {
 	}
 
 	// Create Gemini client
-	ctx := context.Background()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
 	clientConfig := &genai.ClientConfig{
 		APIKey:  config.APIKey,
 		Backend: genai.BackendGeminiAPI,
@@ -194,9 +206,17 @@ func main() {
 		log.Fatalf("Failed to create Gemini client: %v", err)
 	}
 
+	// Initialize storage backend
+	stor, err := storage.NewStorage(config)
+	if err != nil {
+		log.Fatalf("Failed to initialize storage: %v", err)
+	}
+	defer stor.Close()
+
 	server := &Server{
-		config: config,
-		client: client,
+		config:  config,
+		client:  client,
+		storage: stor,
 	}
 
 	// Create MCP server
@@ -209,6 +229,19 @@ func main() {
 	server.registerTools(mcpServer)
 
 	log.Printf("Starting %s v%s (Transport: %s)", serviceName, version, config.Transport)
+	if config.S3Enabled {
+		log.Printf("S3 storage enabled (bucket: %s, TTL: %v)", config.S3Bucket, config.S3ObjectTTL)
+	}
+
+	// Handle graceful shutdown
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
+
+	go func() {
+		<-sigChan
+		log.Println("Received shutdown signal, cleaning up...")
+		cancel()
+	}()
 
 	// Select transport based on configuration
 	switch config.Transport {
@@ -364,15 +397,11 @@ func (s *Server) handleGeminiImageGeneration(ctx context.Context, req *mcp.CallT
 	}
 
 	var savedFiles []string
+	var downloadURLs []string
+	var expiresAt string
 	var imageContents []mcp.Content // Collect image data for MCP response
 	timestamp := time.Now().Format("20060102_150405")
 	var imagesCreated int
-
-	// Determine output directory
-	outputDir := input.OutputDirectory
-	if outputDir == "" {
-		outputDir = s.config.OutputDir
-	}
 
 	// Check if using Gemini native image generation or Imagen
 	isGeminiModel := strings.HasPrefix(model, "gemini-")
@@ -402,42 +431,42 @@ func (s *Server) handleGeminiImageGeneration(ctx context.Context, req *mcp.CallT
 		}
 
 		// Process response and extract images
-		if outputDir != "" {
-			if err := os.MkdirAll(outputDir, 0755); err != nil {
-				log.Printf("Error creating output directory: %v", err)
-			}
-		}
-
 		for _, candidate := range response.Candidates {
 			if candidate.Content == nil {
 				continue
 			}
 
-			for i, part := range candidate.Content.Parts {
+			for _, part := range candidate.Content.Parts {
 				if part.InlineData != nil && len(part.InlineData.Data) > 0 {
 					imagesCreated++
 
-					// Add image to MCP response content
 					mimeType := part.InlineData.MIMEType
 					if mimeType == "" {
 						mimeType = "image/png"
 					}
-					imageContents = append(imageContents, &mcp.ImageContent{
-						Data:     part.InlineData.Data,
-						MIMEType: mimeType,
-					})
 
-					// Also save to file if output directory specified
-					if outputDir != "" {
-						filename := fmt.Sprintf("gemini_generated_%s_%s_%d.png", style, timestamp, i)
-						outputPath := filepath.Join(outputDir, filename)
+					// Store via storage interface
+					result, err := s.storage.Store(ctx, part.InlineData.Data, mimeType, "gemini_image")
+					if err != nil {
+						log.Printf("Error storing image: %v", err)
+						continue
+					}
 
-						if err := os.WriteFile(outputPath, part.InlineData.Data, 0644); err == nil {
-							savedFiles = append(savedFiles, outputPath)
-							log.Printf("Saved generated image to: %s", outputPath)
-						} else {
-							log.Printf("Error saving image: %v", err)
+					savedFiles = append(savedFiles, result.ObjectKey)
+					log.Printf("Stored image: %s", result.Location)
+
+					if s.storage.IsRemote() {
+						// For S3: return presigned URL
+						downloadURLs = append(downloadURLs, result.Location)
+						if result.ExpiresAt != nil && expiresAt == "" {
+							expiresAt = result.ExpiresAt.Format(time.RFC3339)
 						}
+					} else {
+						// For local storage: return base64 image content
+						imageContents = append(imageContents, &mcp.ImageContent{
+							Data:     part.InlineData.Data,
+							MIMEType: mimeType,
+						})
 					}
 				}
 			}
@@ -502,29 +531,30 @@ func (s *Server) handleGeminiImageGeneration(ctx context.Context, req *mcp.CallT
 		imagesCreated = len(response.GeneratedImages)
 
 		// Process generated images
-		for i, genImage := range response.GeneratedImages {
+		for _, genImage := range response.GeneratedImages {
 			if genImage.Image != nil && len(genImage.Image.ImageBytes) > 0 {
-				// Add image to MCP response content
-				imageContents = append(imageContents, &mcp.ImageContent{
-					Data:     genImage.Image.ImageBytes,
-					MIMEType: "image/png",
-				})
+				// Store via storage interface
+				result, err := s.storage.Store(ctx, genImage.Image.ImageBytes, "image/png", "imagen_image")
+				if err != nil {
+					log.Printf("Error storing image: %v", err)
+					continue
+				}
 
-				// Also save to file if output directory specified
-				if outputDir != "" {
-					if err := os.MkdirAll(outputDir, 0755); err == nil {
-						filename := fmt.Sprintf("imagen_generated_%s_%s_%d.png", style, timestamp, i)
-						outputPath := filepath.Join(outputDir, filename)
+				savedFiles = append(savedFiles, result.ObjectKey)
+				log.Printf("Stored image: %s", result.Location)
 
-						if err := os.WriteFile(outputPath, genImage.Image.ImageBytes, 0644); err == nil {
-							savedFiles = append(savedFiles, outputPath)
-							log.Printf("Saved generated image to: %s", outputPath)
-						} else {
-							log.Printf("Error saving image: %v", err)
-						}
-					} else {
-						log.Printf("Error creating output directory: %v", err)
+				if s.storage.IsRemote() {
+					// For S3: return presigned URL
+					downloadURLs = append(downloadURLs, result.Location)
+					if result.ExpiresAt != nil && expiresAt == "" {
+						expiresAt = result.ExpiresAt.Format(time.RFC3339)
 					}
+				} else {
+					// For local storage: return base64 image content
+					imageContents = append(imageContents, &mcp.ImageContent{
+						Data:     genImage.Image.ImageBytes,
+						MIMEType: "image/png",
+					})
 				}
 			}
 		}
@@ -542,47 +572,33 @@ func (s *Server) handleGeminiImageGeneration(ctx context.Context, req *mcp.CallT
 		"image_size":      imageSize,
 	}
 
-	// Save metadata if output directory is specified
-	if outputDir != "" {
-		if err := os.MkdirAll(outputDir, 0755); err == nil {
-			filename := fmt.Sprintf("image_metadata_%s.json", timestamp)
-			outputPath := filepath.Join(outputDir, filename)
-
-			metadataContent := map[string]interface{}{
-				"model":           model,
-				"prompt":          input.Prompt,
-				"enhanced_prompt": promptText,
-				"style":           style,
-				"aspect_ratio":    input.AspectRatio,
-				"quality":         quality,
-				"image_size":      imageSize,
-				"language":        language,
-				"include_text":    input.IncludeText,
-				"tags":            input.Tags,
-				"generated_at":    timestamp,
-				"images_created":  imagesCreated,
-			}
-
-			if jsonData, err := json.MarshalIndent(metadataContent, "", "  "); err == nil {
-				if err := os.WriteFile(outputPath, jsonData, 0644); err == nil {
-					savedFiles = append(savedFiles, outputPath)
-				}
-			}
-		}
-	}
-
-	// Build result with image content for MCP clients
+	// Build result based on storage type
 	var result *mcp.CallToolResult
-	if len(imageContents) > 0 {
-		result = &mcp.CallToolResult{
-			Content: imageContents,
+	if s.storage.IsRemote() {
+		// For S3: return text content with download URLs
+		var contentText string
+		if len(downloadURLs) > 0 {
+			contentText = fmt.Sprintf("Generated %d image(s). Download URLs:\n", len(downloadURLs))
+			for i, url := range downloadURLs {
+				contentText += fmt.Sprintf("%d. %s\n", i+1, url)
+			}
+			if expiresAt != "" {
+				contentText += fmt.Sprintf("\nURLs expire at: %s", expiresAt)
+			}
 		}
-	}
-
-	// Clean up temporary files after building result (images are returned via MCP content)
-	for _, f := range savedFiles {
-		if err := os.Remove(f); err != nil {
-			log.Printf("Warning: failed to remove temp file %s: %v", f, err)
+		result = &mcp.CallToolResult{
+			Content: []mcp.Content{
+				&mcp.TextContent{
+					Text: contentText,
+				},
+			},
+		}
+	} else {
+		// For local storage: return base64 image content
+		if len(imageContents) > 0 {
+			result = &mcp.CallToolResult{
+				Content: imageContents,
+			}
 		}
 	}
 
@@ -595,6 +611,8 @@ func (s *Server) handleGeminiImageGeneration(ctx context.Context, req *mcp.CallT
 		Language:      language,
 		Tags:          input.Tags,
 		SavedFiles:    savedFiles,
+		DownloadURLs:  downloadURLs,
+		ExpiresAt:     expiresAt,
 		Metadata:      metadata,
 		GeneratedAt:   timestamp,
 		ImagesCreated: imagesCreated,
@@ -682,45 +700,47 @@ func (s *Server) handleGeminiImageEdit(ctx context.Context, req *mcp.CallToolReq
 
 	// Process response
 	var savedFiles []string
+	var downloadURLs []string
+	var expiresAt string
 	var imageContents []mcp.Content
 	timestamp := time.Now().Format("20060102_150405")
 	var editedImagePath string
-
-	// Determine output directory
-	outputDir := input.OutputDirectory
-	if outputDir == "" {
-		outputDir = s.config.OutputDir
-	}
 
 	for _, candidate := range response.Candidates {
 		if candidate.Content == nil {
 			continue
 		}
 
-		for i, part := range candidate.Content.Parts {
+		for _, part := range candidate.Content.Parts {
 			if part.InlineData != nil && len(part.InlineData.Data) > 0 {
-				// Add image to MCP response content
 				mimeType := part.InlineData.MIMEType
 				if mimeType == "" {
 					mimeType = "image/png"
 				}
-				imageContents = append(imageContents, &mcp.ImageContent{
-					Data:     part.InlineData.Data,
-					MIMEType: mimeType,
-				})
 
-				// Also save to file if output directory specified
-				if outputDir != "" {
-					if err := os.MkdirAll(outputDir, 0755); err == nil {
-						filename := fmt.Sprintf("gemini_edited_%s_%s_%d.png", editType, timestamp, i)
-						outputPath := filepath.Join(outputDir, filename)
+				// Store via storage interface
+				result, err := s.storage.Store(ctx, part.InlineData.Data, mimeType, "gemini_edit")
+				if err != nil {
+					log.Printf("Error storing image: %v", err)
+					continue
+				}
 
-						if err := os.WriteFile(outputPath, part.InlineData.Data, 0644); err == nil {
-							savedFiles = append(savedFiles, outputPath)
-							editedImagePath = outputPath
-							log.Printf("Saved edited image to: %s", outputPath)
-						}
+				savedFiles = append(savedFiles, result.ObjectKey)
+				editedImagePath = result.Location
+				log.Printf("Stored edited image: %s", result.Location)
+
+				if s.storage.IsRemote() {
+					// For S3: return presigned URL
+					downloadURLs = append(downloadURLs, result.Location)
+					if result.ExpiresAt != nil && expiresAt == "" {
+						expiresAt = result.ExpiresAt.Format(time.RFC3339)
 					}
+				} else {
+					// For local storage: return base64 image content
+					imageContents = append(imageContents, &mcp.ImageContent{
+						Data:     part.InlineData.Data,
+						MIMEType: mimeType,
+					})
 				}
 			}
 		}
@@ -736,18 +756,33 @@ func (s *Server) handleGeminiImageEdit(ctx context.Context, req *mcp.CallToolReq
 		"mask_area":      input.MaskArea,
 	}
 
-	// Build result with image content for MCP clients
+	// Build result based on storage type
 	var result *mcp.CallToolResult
-	if len(imageContents) > 0 {
-		result = &mcp.CallToolResult{
-			Content: imageContents,
+	if s.storage.IsRemote() {
+		// For S3: return text content with download URLs
+		var contentText string
+		if len(downloadURLs) > 0 {
+			contentText = fmt.Sprintf("Edited image. Download URLs:\n")
+			for i, url := range downloadURLs {
+				contentText += fmt.Sprintf("%d. %s\n", i+1, url)
+			}
+			if expiresAt != "" {
+				contentText += fmt.Sprintf("\nURLs expire at: %s", expiresAt)
+			}
 		}
-	}
-
-	// Clean up temporary files after building result (images are returned via MCP content)
-	for _, f := range savedFiles {
-		if err := os.Remove(f); err != nil {
-			log.Printf("Warning: failed to remove temp file %s: %v", f, err)
+		result = &mcp.CallToolResult{
+			Content: []mcp.Content{
+				&mcp.TextContent{
+					Text: contentText,
+				},
+			},
+		}
+	} else {
+		// For local storage: return base64 image content
+		if len(imageContents) > 0 {
+			result = &mcp.CallToolResult{
+				Content: imageContents,
+			}
 		}
 	}
 
@@ -758,6 +793,8 @@ func (s *Server) handleGeminiImageEdit(ctx context.Context, req *mcp.CallToolReq
 		AspectRatio:   input.AspectRatio,
 		Model:         model,
 		SavedFiles:    savedFiles,
+		DownloadURLs:  downloadURLs,
+		ExpiresAt:     expiresAt,
 		Metadata:      metadata,
 		GeneratedAt:   timestamp,
 	}, nil
@@ -842,45 +879,47 @@ func (s *Server) handleGeminiMultiImage(ctx context.Context, req *mcp.CallToolRe
 
 	// Process response
 	var savedFiles []string
+	var downloadURLs []string
+	var expiresAt string
 	var imageContents []mcp.Content
 	timestamp := time.Now().Format("20060102_150405")
 	var combinedImagePath string
-
-	// Determine output directory
-	outputDir := input.OutputDirectory
-	if outputDir == "" {
-		outputDir = s.config.OutputDir
-	}
 
 	for _, candidate := range response.Candidates {
 		if candidate.Content == nil {
 			continue
 		}
 
-		for i, part := range candidate.Content.Parts {
+		for _, part := range candidate.Content.Parts {
 			if part.InlineData != nil && len(part.InlineData.Data) > 0 {
-				// Add image to MCP response content
 				mimeType := part.InlineData.MIMEType
 				if mimeType == "" {
 					mimeType = "image/png"
 				}
-				imageContents = append(imageContents, &mcp.ImageContent{
-					Data:     part.InlineData.Data,
-					MIMEType: mimeType,
-				})
 
-				// Also save to file if output directory specified
-				if outputDir != "" {
-					if err := os.MkdirAll(outputDir, 0755); err == nil {
-						filename := fmt.Sprintf("gemini_combined_%s_%s_%d.png", blendMode, timestamp, i)
-						outputPath := filepath.Join(outputDir, filename)
+				// Store via storage interface
+				result, err := s.storage.Store(ctx, part.InlineData.Data, mimeType, "gemini_multi")
+				if err != nil {
+					log.Printf("Error storing image: %v", err)
+					continue
+				}
 
-						if err := os.WriteFile(outputPath, part.InlineData.Data, 0644); err == nil {
-							savedFiles = append(savedFiles, outputPath)
-							combinedImagePath = outputPath
-							log.Printf("Saved combined image to: %s", outputPath)
-						}
+				savedFiles = append(savedFiles, result.ObjectKey)
+				combinedImagePath = result.Location
+				log.Printf("Stored combined image: %s", result.Location)
+
+				if s.storage.IsRemote() {
+					// For S3: return presigned URL
+					downloadURLs = append(downloadURLs, result.Location)
+					if result.ExpiresAt != nil && expiresAt == "" {
+						expiresAt = result.ExpiresAt.Format(time.RFC3339)
 					}
+				} else {
+					// For local storage: return base64 image content
+					imageContents = append(imageContents, &mcp.ImageContent{
+						Data:     part.InlineData.Data,
+						MIMEType: mimeType,
+					})
 				}
 			}
 		}
@@ -895,18 +934,33 @@ func (s *Server) handleGeminiMultiImage(ctx context.Context, req *mcp.CallToolRe
 		"images_count":   fmt.Sprintf("%d", len(input.InputImagePaths)),
 	}
 
-	// Build result with image content for MCP clients
+	// Build result based on storage type
 	var result *mcp.CallToolResult
-	if len(imageContents) > 0 {
-		result = &mcp.CallToolResult{
-			Content: imageContents,
+	if s.storage.IsRemote() {
+		// For S3: return text content with download URLs
+		var contentText string
+		if len(downloadURLs) > 0 {
+			contentText = "Combined image. Download URLs:\n"
+			for i, url := range downloadURLs {
+				contentText += fmt.Sprintf("%d. %s\n", i+1, url)
+			}
+			if expiresAt != "" {
+				contentText += fmt.Sprintf("\nURLs expire at: %s", expiresAt)
+			}
 		}
-	}
-
-	// Clean up temporary files after building result (images are returned via MCP content)
-	for _, f := range savedFiles {
-		if err := os.Remove(f); err != nil {
-			log.Printf("Warning: failed to remove temp file %s: %v", f, err)
+		result = &mcp.CallToolResult{
+			Content: []mcp.Content{
+				&mcp.TextContent{
+					Text: contentText,
+				},
+			},
+		}
+	} else {
+		// For local storage: return base64 image content
+		if len(imageContents) > 0 {
+			result = &mcp.CallToolResult{
+				Content: imageContents,
+			}
 		}
 	}
 
@@ -917,6 +971,8 @@ func (s *Server) handleGeminiMultiImage(ctx context.Context, req *mcp.CallToolRe
 		AspectRatio:     input.AspectRatio,
 		Model:           model,
 		SavedFiles:      savedFiles,
+		DownloadURLs:    downloadURLs,
+		ExpiresAt:       expiresAt,
 		Metadata:        metadata,
 		GeneratedAt:     timestamp,
 		ImagesProcessed: len(input.InputImagePaths),
@@ -982,6 +1038,8 @@ func (s *Server) handleVeoGeneration(ctx context.Context, req *mcp.CallToolReque
 	}
 
 	var savedFiles []string
+	var downloadURLs []string
+	var expiresAt string
 	var videoURL string
 	status := "generating"
 
@@ -994,25 +1052,25 @@ func (s *Server) handleVeoGeneration(ctx context.Context, req *mcp.CallToolReque
 			video := operation.Response.GeneratedVideos[0]
 			log.Printf("Video generation completed successfully")
 
-			// Download and save video if output directory is specified
-			if input.OutputDirectory != "" {
-				if err := os.MkdirAll(input.OutputDirectory, 0755); err == nil {
-					filename := fmt.Sprintf("veo_video_%s.mp4", timestamp)
-					outputPath := filepath.Join(input.OutputDirectory, filename)
+			// Download the video file
+			downloadURI := genai.NewDownloadURIFromVideo(video.Video)
+			videoData, err := s.client.Files.Download(ctx, downloadURI, nil)
+			if err != nil {
+				log.Printf("Error downloading video: %v", err)
+			} else {
+				// Store via storage interface
+				result, err := s.storage.Store(ctx, videoData, "video/mp4", "veo_video")
+				if err != nil {
+					log.Printf("Error storing video: %v", err)
+				} else {
+					savedFiles = append(savedFiles, result.ObjectKey)
+					videoURL = result.Location
+					log.Printf("Stored video: %s", result.Location)
 
-					// Download the video file using proper URI
-					downloadURI := genai.NewDownloadURIFromVideo(video.Video)
-					videoData, err := s.client.Files.Download(ctx, downloadURI, nil)
-					if err != nil {
-						log.Printf("Error downloading video: %v", err)
-					} else {
-						// Save the video bytes to file
-						if err := os.WriteFile(outputPath, videoData, 0644); err != nil {
-							log.Printf("Error saving video file: %v", err)
-						} else {
-							savedFiles = append(savedFiles, outputPath)
-							videoURL = outputPath
-							log.Printf("Video saved to: %s", outputPath)
+					if s.storage.IsRemote() {
+						downloadURLs = append(downloadURLs, result.Location)
+						if result.ExpiresAt != nil {
+							expiresAt = result.ExpiresAt.Format(time.RFC3339)
 						}
 					}
 				}
@@ -1023,44 +1081,36 @@ func (s *Server) handleVeoGeneration(ctx context.Context, req *mcp.CallToolReque
 		log.Printf("Video generation timed out after 10 minutes")
 	}
 
-	// Save metadata
+	// Create metadata
 	metadata := map[string]string{
 		"original_prompt": input.Prompt,
 		"negative_prompt": input.NegativePrompt,
 		"operation_id":    operationID,
 	}
 
-	if input.OutputDirectory != "" {
-		if err := os.MkdirAll(input.OutputDirectory, 0755); err == nil {
-			filename := fmt.Sprintf("veo_metadata_%s.json", timestamp)
-			outputPath := filepath.Join(input.OutputDirectory, filename)
-
-			metadataContent := map[string]interface{}{
-				"model":            model,
-				"prompt":           input.Prompt,
-				"negative_prompt":  input.NegativePrompt,
-				"aspect_ratio":     aspectRatio,
-				"resolution":       resolution,
-				"operation_id":     operationID,
-				"video_url":        videoURL,
-				"status":           status,
-				"generated_at":     timestamp,
-				"estimated_length": "8 seconds",
-			}
-
-			if jsonData, err := json.MarshalIndent(metadataContent, "", "  "); err == nil {
-				if err := os.WriteFile(outputPath, jsonData, 0644); err == nil {
-					savedFiles = append(savedFiles, outputPath)
-				}
-			}
+	// Build result based on storage type
+	var result *mcp.CallToolResult
+	if s.storage.IsRemote() && len(downloadURLs) > 0 {
+		contentText := fmt.Sprintf("Video generated. Download URL:\n%s", downloadURLs[0])
+		if expiresAt != "" {
+			contentText += fmt.Sprintf("\n\nURL expires at: %s", expiresAt)
+		}
+		result = &mcp.CallToolResult{
+			Content: []mcp.Content{
+				&mcp.TextContent{
+					Text: contentText,
+				},
+			},
 		}
 	}
 
-	return nil, VeoGenerationOutput{
+	return result, VeoGenerationOutput{
 		OperationID:     operationID,
 		Status:          status,
 		VideoURL:        videoURL,
 		SavedFiles:      savedFiles,
+		DownloadURLs:    downloadURLs,
+		ExpiresAt:       expiresAt,
 		Model:           model,
 		AspectRatio:     aspectRatio,
 		Resolution:      resolution,
@@ -1129,6 +1179,8 @@ func (s *Server) handleVeoTextToVideo(ctx context.Context, req *mcp.CallToolRequ
 	}
 
 	var savedFiles []string
+	var downloadURLs []string
+	var expiresAt string
 	var videoURL string
 	status := "generating"
 
@@ -1141,25 +1193,25 @@ func (s *Server) handleVeoTextToVideo(ctx context.Context, req *mcp.CallToolRequ
 			video := operation.Response.GeneratedVideos[0]
 			log.Printf("Text-to-video generation completed successfully")
 
-			// Download and save video if output directory is specified
-			if input.OutputDirectory != "" {
-				if err := os.MkdirAll(input.OutputDirectory, 0755); err == nil {
-					filename := fmt.Sprintf("veo_text_to_video_%s.mp4", timestamp)
-					outputPath := filepath.Join(input.OutputDirectory, filename)
+			// Download the video file
+			downloadURI := genai.NewDownloadURIFromVideo(video.Video)
+			videoData, err := s.client.Files.Download(ctx, downloadURI, nil)
+			if err != nil {
+				log.Printf("Error downloading video: %v", err)
+			} else {
+				// Store via storage interface
+				result, err := s.storage.Store(ctx, videoData, "video/mp4", "veo_text2video")
+				if err != nil {
+					log.Printf("Error storing video: %v", err)
+				} else {
+					savedFiles = append(savedFiles, result.ObjectKey)
+					videoURL = result.Location
+					log.Printf("Stored text-to-video: %s", result.Location)
 
-					// Download the video file using proper URI
-					downloadURI := genai.NewDownloadURIFromVideo(video.Video)
-					videoData, err := s.client.Files.Download(ctx, downloadURI, nil)
-					if err != nil {
-						log.Printf("Error downloading video: %v", err)
-					} else {
-						// Save the video bytes to file
-						if err := os.WriteFile(outputPath, videoData, 0644); err != nil {
-							log.Printf("Error saving video file: %v", err)
-						} else {
-							savedFiles = append(savedFiles, outputPath)
-							videoURL = outputPath
-							log.Printf("Text-to-video saved to: %s", outputPath)
+					if s.storage.IsRemote() {
+						downloadURLs = append(downloadURLs, result.Location)
+						if result.ExpiresAt != nil {
+							expiresAt = result.ExpiresAt.Format(time.RFC3339)
 						}
 					}
 				}
@@ -1170,7 +1222,7 @@ func (s *Server) handleVeoTextToVideo(ctx context.Context, req *mcp.CallToolRequ
 		log.Printf("Text-to-video generation timed out after 10 minutes")
 	}
 
-	// Save metadata
+	// Create metadata
 	metadata := map[string]string{
 		"generation_type": "text-to-video",
 		"original_prompt": input.Prompt,
@@ -1182,39 +1234,29 @@ func (s *Server) handleVeoTextToVideo(ctx context.Context, req *mcp.CallToolRequ
 		metadata["seed"] = fmt.Sprintf("%d", input.Seed)
 	}
 
-	if input.OutputDirectory != "" {
-		if err := os.MkdirAll(input.OutputDirectory, 0755); err == nil {
-			filename := fmt.Sprintf("veo_text_to_video_metadata_%s.json", timestamp)
-			outputPath := filepath.Join(input.OutputDirectory, filename)
-
-			metadataContent := map[string]interface{}{
-				"generation_type":  "text-to-video",
-				"model":            model,
-				"prompt":           input.Prompt,
-				"negative_prompt":  input.NegativePrompt,
-				"aspect_ratio":     aspectRatio,
-				"resolution":       resolution,
-				"seed":             input.Seed,
-				"operation_id":     operationID,
-				"video_url":        videoURL,
-				"status":           status,
-				"generated_at":     timestamp,
-				"estimated_length": "8 seconds",
-			}
-
-			if jsonData, err := json.MarshalIndent(metadataContent, "", "  "); err == nil {
-				if err := os.WriteFile(outputPath, jsonData, 0644); err == nil {
-					savedFiles = append(savedFiles, outputPath)
-				}
-			}
+	// Build result based on storage type
+	var result *mcp.CallToolResult
+	if s.storage.IsRemote() && len(downloadURLs) > 0 {
+		contentText := fmt.Sprintf("Text-to-video generated. Download URL:\n%s", downloadURLs[0])
+		if expiresAt != "" {
+			contentText += fmt.Sprintf("\n\nURL expires at: %s", expiresAt)
+		}
+		result = &mcp.CallToolResult{
+			Content: []mcp.Content{
+				&mcp.TextContent{
+					Text: contentText,
+				},
+			},
 		}
 	}
 
-	return nil, VeoGenerationOutput{
+	return result, VeoGenerationOutput{
 		OperationID:     operationID,
 		Status:          status,
 		VideoURL:        videoURL,
 		SavedFiles:      savedFiles,
+		DownloadURLs:    downloadURLs,
+		ExpiresAt:       expiresAt,
 		Model:           model,
 		AspectRatio:     aspectRatio,
 		Resolution:      resolution,
@@ -1303,6 +1345,8 @@ func (s *Server) handleVeoImageToVideo(ctx context.Context, req *mcp.CallToolReq
 	}
 
 	var savedFiles []string
+	var downloadURLs []string
+	var expiresAt string
 	var videoURL string
 	status := "generating"
 
@@ -1315,25 +1359,25 @@ func (s *Server) handleVeoImageToVideo(ctx context.Context, req *mcp.CallToolReq
 			video := operation.Response.GeneratedVideos[0]
 			log.Printf("Image-to-video generation completed successfully")
 
-			// Download and save video if output directory is specified
-			if input.OutputDirectory != "" {
-				if err := os.MkdirAll(input.OutputDirectory, 0755); err == nil {
-					filename := fmt.Sprintf("veo_image_to_video_%s.mp4", timestamp)
-					outputPath := filepath.Join(input.OutputDirectory, filename)
+			// Download the video file
+			downloadURI := genai.NewDownloadURIFromVideo(video.Video)
+			videoData, err := s.client.Files.Download(ctx, downloadURI, nil)
+			if err != nil {
+				log.Printf("Error downloading video: %v", err)
+			} else {
+				// Store via storage interface
+				result, err := s.storage.Store(ctx, videoData, "video/mp4", "veo_img2video")
+				if err != nil {
+					log.Printf("Error storing video: %v", err)
+				} else {
+					savedFiles = append(savedFiles, result.ObjectKey)
+					videoURL = result.Location
+					log.Printf("Stored image-to-video: %s", result.Location)
 
-					// Download the video file using proper URI
-					downloadURI := genai.NewDownloadURIFromVideo(video.Video)
-					videoData, err := s.client.Files.Download(ctx, downloadURI, nil)
-					if err != nil {
-						log.Printf("Error downloading video: %v", err)
-					} else {
-						// Save the video bytes to file
-						if err := os.WriteFile(outputPath, videoData, 0644); err != nil {
-							log.Printf("Error saving video file: %v", err)
-						} else {
-							savedFiles = append(savedFiles, outputPath)
-							videoURL = outputPath
-							log.Printf("Image-to-video saved to: %s", outputPath)
+					if s.storage.IsRemote() {
+						downloadURLs = append(downloadURLs, result.Location)
+						if result.ExpiresAt != nil {
+							expiresAt = result.ExpiresAt.Format(time.RFC3339)
 						}
 					}
 				}
@@ -1344,7 +1388,7 @@ func (s *Server) handleVeoImageToVideo(ctx context.Context, req *mcp.CallToolReq
 		log.Printf("Image-to-video generation timed out after 10 minutes")
 	}
 
-	// Save metadata
+	// Create metadata
 	metadata := map[string]string{
 		"generation_type": "image-to-video",
 		"input_image":     input.ImagePath,
@@ -1357,40 +1401,29 @@ func (s *Server) handleVeoImageToVideo(ctx context.Context, req *mcp.CallToolReq
 		metadata["seed"] = fmt.Sprintf("%d", input.Seed)
 	}
 
-	if input.OutputDirectory != "" {
-		if err := os.MkdirAll(input.OutputDirectory, 0755); err == nil {
-			filename := fmt.Sprintf("veo_image_to_video_metadata_%s.json", timestamp)
-			outputPath := filepath.Join(input.OutputDirectory, filename)
-
-			metadataContent := map[string]interface{}{
-				"generation_type":  "image-to-video",
-				"model":            model,
-				"input_image":      input.ImagePath,
-				"prompt":           input.Prompt,
-				"negative_prompt":  input.NegativePrompt,
-				"aspect_ratio":     aspectRatio,
-				"resolution":       resolution,
-				"seed":             input.Seed,
-				"operation_id":     operationID,
-				"video_url":        videoURL,
-				"status":           status,
-				"generated_at":     timestamp,
-				"estimated_length": "8 seconds",
-			}
-
-			if jsonData, err := json.MarshalIndent(metadataContent, "", "  "); err == nil {
-				if err := os.WriteFile(outputPath, jsonData, 0644); err == nil {
-					savedFiles = append(savedFiles, outputPath)
-				}
-			}
+	// Build result based on storage type
+	var result *mcp.CallToolResult
+	if s.storage.IsRemote() && len(downloadURLs) > 0 {
+		contentText := fmt.Sprintf("Image-to-video generated. Download URL:\n%s", downloadURLs[0])
+		if expiresAt != "" {
+			contentText += fmt.Sprintf("\n\nURL expires at: %s", expiresAt)
+		}
+		result = &mcp.CallToolResult{
+			Content: []mcp.Content{
+				&mcp.TextContent{
+					Text: contentText,
+				},
+			},
 		}
 	}
 
-	return nil, VeoGenerationOutput{
+	return result, VeoGenerationOutput{
 		OperationID:     operationID,
 		Status:          status,
 		VideoURL:        videoURL,
 		SavedFiles:      savedFiles,
+		DownloadURLs:    downloadURLs,
+		ExpiresAt:       expiresAt,
 		Model:           model,
 		AspectRatio:     aspectRatio,
 		Resolution:      resolution,
