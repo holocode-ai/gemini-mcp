@@ -1539,9 +1539,26 @@ func (s *Server) handleVeoImageToVideo(ctx context.Context, req *mcp.CallToolReq
 		return nil, VeoGenerationOutput{}, fmt.Errorf("failed to read input image: %v", err)
 	}
 
-	// Create Image object from the file data
+	// Detect MIME type from file extension (required by Veo API)
+	ext := strings.ToLower(filepath.Ext(localImagePath))
+	var mimeType string
+	switch ext {
+	case ".png":
+		mimeType = "image/png"
+	case ".jpg", ".jpeg":
+		mimeType = "image/jpeg"
+	case ".gif":
+		mimeType = "image/gif"
+	case ".webp":
+		mimeType = "image/webp"
+	default:
+		mimeType = "image/png" // Default to PNG
+	}
+
+	// Create Image object with both ImageBytes and MIMEType (required by Veo API)
 	inputImage := &genai.Image{
 		ImageBytes: imageData,
+		MIMEType:   mimeType,
 	}
 
 	// Build prompt with negative prompt if specified
