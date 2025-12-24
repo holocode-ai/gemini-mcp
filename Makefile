@@ -82,8 +82,34 @@ build-upload-media-linux-arm64:
 	@mkdir -p $(BUILD_DIR)
 	GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build $(LDFLAGS) -o $(BUILD_DIR)/$(UPLOAD_MEDIA_BINARY)-linux-arm64 ./cmd/upload_media
 
+# Build for Windows x86_64
+build-windows-amd64: build-gemini-mcp-windows-amd64 build-upload-media-windows-amd64
+
+build-gemini-mcp-windows-amd64:
+	@echo "Building $(GEMINI_MCP_BINARY) v$(VERSION) for Windows x86_64..."
+	@mkdir -p $(BUILD_DIR)
+	GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build $(LDFLAGS) -o $(BUILD_DIR)/$(GEMINI_MCP_BINARY)-windows-amd64.exe main.go
+
+build-upload-media-windows-amd64:
+	@echo "Building $(UPLOAD_MEDIA_BINARY) v$(VERSION) for Windows x86_64..."
+	@mkdir -p $(BUILD_DIR)
+	GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build $(LDFLAGS) -o $(BUILD_DIR)/$(UPLOAD_MEDIA_BINARY)-windows-amd64.exe ./cmd/upload_media
+
+# Build for Windows ARM64
+build-windows-arm64: build-gemini-mcp-windows-arm64 build-upload-media-windows-arm64
+
+build-gemini-mcp-windows-arm64:
+	@echo "Building $(GEMINI_MCP_BINARY) v$(VERSION) for Windows ARM64..."
+	@mkdir -p $(BUILD_DIR)
+	GOOS=windows GOARCH=arm64 CGO_ENABLED=0 go build $(LDFLAGS) -o $(BUILD_DIR)/$(GEMINI_MCP_BINARY)-windows-arm64.exe main.go
+
+build-upload-media-windows-arm64:
+	@echo "Building $(UPLOAD_MEDIA_BINARY) v$(VERSION) for Windows ARM64..."
+	@mkdir -p $(BUILD_DIR)
+	GOOS=windows GOARCH=arm64 CGO_ENABLED=0 go build $(LDFLAGS) -o $(BUILD_DIR)/$(UPLOAD_MEDIA_BINARY)-windows-arm64.exe ./cmd/upload_media
+
 # Build all platforms
-build-all: build-darwin-arm64 build-darwin-amd64 build-linux-amd64 build-linux-arm64
+build-all: build-darwin-arm64 build-darwin-amd64 build-linux-amd64 build-linux-arm64 build-windows-amd64 build-windows-arm64
 	@echo "All platform builds complete!"
 
 # Build for multiple platforms (with version suffix, for releases)
@@ -220,7 +246,9 @@ help:
 	@echo "  build-darwin-amd64       - Build both for macOS Intel"
 	@echo "  build-linux-amd64        - Build both for Linux x86_64"
 	@echo "  build-linux-arm64        - Build both for Linux ARM64"
-	@echo "  build-all                - Build both for all platforms"
+	@echo "  build-windows-amd64      - Build both for Windows x86_64"
+	@echo "  build-windows-arm64      - Build both for Windows ARM64"
+	@echo "  build-all                - Build both for all platforms (including Windows)"
 	@echo "  release                  - Build for release (with version suffix)"
 	@echo ""
 	@echo "Run:"
