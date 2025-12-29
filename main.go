@@ -615,9 +615,13 @@ func (s *Server) handleGeminiImageGeneration(ctx context.Context, req *mcp.CallT
 			genai.NewContentFromText(promptText, genai.RoleUser),
 		}
 
-		// Configure for image generation
+		// Configure for image generation with ImageConfig for resolution and aspect ratio
 		config := &genai.GenerateContentConfig{
 			ResponseModalities: []string{"IMAGE", "TEXT"},
+			ImageConfig: &genai.ImageConfig{
+				AspectRatio: input.AspectRatio,
+				ImageSize:   imageSize,
+			},
 		}
 
 		// Generate content

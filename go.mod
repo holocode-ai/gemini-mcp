@@ -1,13 +1,13 @@
 module gemini-mcp
 
-go 1.23.0
+go 1.24
 
 toolchain go1.24.7
 
 require (
 	github.com/minio/minio-go/v7 v7.0.97
 	github.com/modelcontextprotocol/go-sdk v1.2.0
-	google.golang.org/genai v1.25.0
+	google.golang.org/genai v1.40.0
 )
 
 require (
